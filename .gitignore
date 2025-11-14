@@ -1,0 +1,71 @@
+# Build directories
+build/
+out/
+bin/
+lib/
+cmake-build-*/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.cmake
+!CMakeLists.txt
+
+# CUDA
+*.i
+*.ii
+*.gpu
+*.ptx
+*.cubin
+*.fatbin
+
+# Compiled files
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.exp
+*.pdb
+*.ilk
+
+# vcpkg
+vcpkg_installed/
+.vcpkg/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Test data
+*.fastq
+*.fastq.gz
+*.fasta
+*.fa
+*.fq
+*.bam
+*.bai
+*.sam
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

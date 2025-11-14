@@ -1,0 +1,19 @@
+{
+  "name": "winalign",
+  "version": "0.1.0",
+  "description": "Windows-Native GPU-Accelerated Genomic Alignment Pipeline",
+  "homepage": "https://github.com/tcBio/WinAlign",
+  "license": "MIT",
+  "dependencies": [
+    {
+      "name": "zlib",
+      "version>=": "1.2.11"
+    },
+    {
+      "name": "htslib",
+      "version>=": "1.15.0",
+      "platform": "windows"
+    }
+  ],
+  "builtin-baseline": "latest"
+}
