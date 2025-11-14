@@ -1,6 +1,8 @@
 #include "winalign/fastq_parser.h"
 #include <fstream>
 #include <sstream>
+#include <cstring>
+#include <zlib.h>
 
 namespace winalign {
 
@@ -8,29 +10,118 @@ namespace winalign {
 class FastqParser::Impl {
 public:
     Impl(const std::string& filename, bool is_gzipped)
-        : filename_(filename), is_gzipped_(is_gzipped), total_reads_(0) {}
+        : filename_(filename), is_gzipped_(is_gzipped), total_reads_(0),
+          gzfile_(nullptr), file_(), eof_(false) {
+        // Auto-detect gzip if not specified
+        if (!is_gzipped_) {
+            is_gzipped_ = (filename.length() > 3 &&
+                          filename.substr(filename.length() - 3) == ".gz");
+        }
+    }
+
+    ~Impl() {
+        close();
+    }
 
     Result<bool> open() {
-        // TODO: Implement with zlib support
-        return Result<bool>(ErrorCode::RUNTIME_ERROR, "Not implemented");
+        if (is_gzipped_) {
+            gzfile_ = gzopen(filename_.c_str(), "rb");
+            if (!gzfile_) {
+                return Result<bool>(ErrorCode::FILE_NOT_FOUND,
+                                  "Failed to open gzipped file: " + filename_);
+            }
+            // Set buffer size for better performance
+            gzbuffer(gzfile_, 128 * 1024); // 128KB buffer
+        } else {
+            file_.open(filename_, std::ios::binary);
+            if (!file_.is_open()) {
+                return Result<bool>(ErrorCode::FILE_NOT_FOUND,
+                                  "Failed to open file: " + filename_);
+            }
+        }
+
+        eof_ = false;
+        return Result<bool>(true);
     }
 
     void close() {
-        // TODO: Close file handles
+        if (is_gzipped_ && gzfile_) {
+            gzclose(gzfile_);
+            gzfile_ = nullptr;
+        } else if (file_.is_open()) {
+            file_.close();
+        }
+        eof_ = true;
     }
 
     bool is_open() const {
-        return false; // TODO
+        if (is_gzipped_) {
+            return gzfile_ != nullptr;
+        } else {
+            return file_.is_open();
+        }
     }
 
     bool next(Read& read) {
-        // TODO: Parse next FASTQ record
-        return false;
+        if (eof_) return false;
+
+        // FASTQ format:
+        // @read_name
+        // sequence
+        // +
+        // quality
+
+        std::string line;
+
+        // Line 1: Read name (starts with @)
+        if (!read_line(line) || line.empty() || line[0] != '@') {
+            eof_ = true;
+            return false;
+        }
+        read.name = line.substr(1); // Remove '@'
+        read.id = total_reads_;
+
+        // Line 2: Sequence
+        if (!read_line(line)) {
+            eof_ = true;
+            return false;
+        }
+        read.sequence = line;
+
+        // Line 3: Separator (starts with +)
+        if (!read_line(line) || line.empty() || line[0] != '+') {
+            eof_ = true;
+            return false;
+        }
+
+        // Line 4: Quality scores
+        if (!read_line(line)) {
+            eof_ = true;
+            return false;
+        }
+        read.quality = line;
+
+        // Validate lengths match
+        if (read.sequence.length() != read.quality.length()) {
+            eof_ = true;
+            return false;
+        }
+
+        total_reads_++;
+        return true;
     }
 
     size_t next_batch(std::vector<Read>& reads, size_t batch_size) {
-        // TODO: Parse batch of reads
-        return 0;
+        reads.clear();
+        reads.reserve(batch_size);
+
+        for (size_t i = 0; i < batch_size; ++i) {
+            Read read;
+            if (!next(read)) break;
+            reads.push_back(std::move(read));
+        }
+
+        return reads.size();
     }
 
     uint64_t total_reads() const {
@@ -38,13 +129,40 @@ public:
     }
 
     bool eof() const {
-        return true; // TODO
+        return eof_;
     }
 
 private:
+    // Read a line from file (gzipped or not)
+    bool read_line(std::string& line) {
+        line.clear();
+
+        if (is_gzipped_) {
+            char buffer[4096];
+            if (gzgets(gzfile_, buffer, sizeof(buffer)) == nullptr) {
+                return false;
+            }
+            line = buffer;
+        } else {
+            if (!std::getline(file_, line)) {
+                return false;
+            }
+        }
+
+        // Remove trailing newline/carriage return
+        while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
+            line.pop_back();
+        }
+
+        return true;
+    }
+
     std::string filename_;
     bool is_gzipped_;
     uint64_t total_reads_;
+    gzFile gzfile_;           // For gzipped files
+    std::ifstream file_;      // For uncompressed files
+    bool eof_;
 };
 
 FastqParser::FastqParser(const std::string& filename, bool is_gzipped)

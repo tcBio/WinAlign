@@ -125,9 +125,21 @@ int main(int argc, char* argv[]) {
     // Create and run pipeline
     Pipeline pipeline(config);
 
-    // Set progress callback
-    pipeline.set_progress_callback([](double progress) {
-        std::cout << "\rProgress: " << static_cast<int>(progress * 100) << "%" << std::flush;
+    // Set progress callback with enhanced display
+    std::string last_stage;
+    pipeline.set_progress_callback([&last_stage](double progress) {
+        // Create progress bar
+        const int bar_width = 50;
+        int filled = static_cast<int>(progress * bar_width);
+
+        std::cout << "\r[";
+        for (int i = 0; i < bar_width; ++i) {
+            if (i < filled) std::cout << "=";
+            else if (i == filled) std::cout << ">";
+            else std::cout << " ";
+        }
+        std::cout << "] " << static_cast<int>(progress * 100) << "% ";
+        std::cout << std::flush;
     });
 
     // Initialize
