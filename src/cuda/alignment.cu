@@ -24,12 +24,16 @@ __global__ void smith_waterman_kernel(
     const uint32_t* read_offsets,
     const uint32_t* read_lengths,
     const Seed* seeds,
+    uint32_t num_seeds,
     const char* reference,
     uint64_t ref_length,
     SWParams params,
     AlignmentResult* results
 ) {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Bounds check
+    if (tid >= num_seeds) return;
 
     // Each thread handles one seed
     const Seed& seed = seeds[tid];
@@ -201,6 +205,7 @@ cudaError_t smith_waterman_align(
         reads.offsets,
         reads.lengths,
         seeds,
+        num_seeds,
         reference,
         ref_length,
         params,

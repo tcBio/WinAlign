@@ -12,6 +12,7 @@ namespace cuda {
  */
 struct Seed {
     uint64_t position;      // Position in reference
+    uint32_t read_id;       // Read ID this seed belongs to
     uint32_t read_offset;   // Offset in read
     uint16_t length;        // Seed length
     uint16_t mismatches;    // Number of mismatches

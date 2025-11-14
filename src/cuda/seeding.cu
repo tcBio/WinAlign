@@ -80,6 +80,7 @@ __global__ void extract_kmers_kernel(
 
         // Store seed
         seeds[seed_idx].position = canonical; // Temporary: store encoded k-mer
+        seeds[seed_idx].read_id = read_id;
         seeds[seed_idx].read_offset = kmer_idx;
         seeds[seed_idx].length = kmer_size;
         seeds[seed_idx].mismatches = 0;
