@@ -1,5 +1,6 @@
 # GPU kernels and CUDA components
 add_library(winalign_cuda OBJECT
+    memory_manager.cu
     seeding.cu
     alignment.cu
     filtering.cu
