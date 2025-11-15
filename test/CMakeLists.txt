@@ -22,3 +22,23 @@ target_include_directories(winalign_tests
 
 # Add tests to CTest
 add_test(NAME WinAlignTests COMMAND winalign_tests)
+
+# Amplicon tests (if enabled)
+if(BUILD_AMPLICON)
+    add_executable(amplicon_tests
+        test_amplicon.cpp
+    )
+
+    target_link_libraries(amplicon_tests
+        PRIVATE
+            winalign_amplicon
+            winalign_cpu
+    )
+
+    target_include_directories(amplicon_tests
+        PRIVATE
+            ${CMAKE_SOURCE_DIR}/include
+    )
+
+    add_test(NAME AmpliconTests COMMAND amplicon_tests)
+endif()
