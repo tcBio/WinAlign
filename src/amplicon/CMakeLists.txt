@@ -35,7 +35,17 @@ add_library(winalign_amplicon STATIC
     barcode_demux.cpp
     multi_sample_vcf.cpp
     realtime_processor.cpp
+    simd_ops.cpp
+    performance_monitor.cpp
 )
+
+# Enable SIMD optimizations if supported
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag("-mavx2" COMPILER_SUPPORTS_AVX2)
+if(COMPILER_SUPPORTS_AVX2)
+    target_compile_options(winalign_amplicon PRIVATE -mavx2 -mfma)
+    message(STATUS "AVX2 support enabled for amplicon library")
+endif()
 
 target_include_directories(winalign_amplicon PUBLIC
     ${CMAKE_SOURCE_DIR}/include
