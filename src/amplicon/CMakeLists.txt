@@ -4,6 +4,7 @@
 add_library(winalign_amplicon_cuda STATIC
     cuda/pileup.cu
     cuda/variant_calling.cu
+    cuda/memory_pool.cu
 )
 
 target_include_directories(winalign_amplicon_cuda PUBLIC
@@ -27,6 +28,9 @@ add_library(winalign_amplicon STATIC
     vcf_writer.cpp
     variant_caller.cpp
     amplicon_pipeline.cpp
+    smith_waterman.cpp
+    primer_trimmer.cpp
+    chimera_detector.cpp
 )
 
 target_include_directories(winalign_amplicon PUBLIC

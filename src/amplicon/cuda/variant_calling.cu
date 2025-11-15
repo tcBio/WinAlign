@@ -8,20 +8,79 @@ namespace amplicon {
 namespace cuda {
 
 /**
- * Device function: Calculate PHRED-scaled quality
+ * Device function: Calculate binomial probability
+ * P(k successes | n trials, probability p)
+ */
+__device__ float binomial_probability(uint32_t k, uint32_t n, float p) {
+    if (n == 0) return 0.0f;
+    if (k > n) return 0.0f;
+
+    // Use log probabilities to avoid overflow
+    // log P(k|n,p) = log(n choose k) + k*log(p) + (n-k)*log(1-p)
+
+    // Approximate log(n choose k) using Stirling's approximation
+    float log_choose = 0.0f;
+    if (k > 0 && k < n) {
+        log_choose = lgammaf(n + 1.0f) - lgammaf(k + 1.0f) - lgammaf(n - k + 1.0f);
+    }
+
+    float log_p = k * logf(fmaxf(p, 1e-10f));
+    float log_1_minus_p = (n - k) * logf(fmaxf(1.0f - p, 1e-10f));
+
+    float log_prob = log_choose + log_p + log_1_minus_p;
+    return expf(log_prob);
+}
+
+/**
+ * Device function: Calculate PHRED-scaled quality (improved Bayesian model)
  */
 __device__ uint8_t calculate_phred_quality(float allele_frequency, uint32_t depth) {
-    // Simple quality model based on binomial distribution
-    // Higher depth and more extreme AF -> higher quality
+    // Improved quality model using Bayesian statistics
+    // Q = -10 * log10(P(error))
 
     if (depth == 0) return 0;
 
-    // Distance from 0.5 (het) - more extreme = higher quality
-    float af_distance = fabsf(allele_frequency - 0.5f);
+    // Sequencing error rate (assume 0.01 = Q20)
+    const float error_rate = 0.01f;
 
-    // Quality increases with depth and AF distance
-    float quality = 10.0f * log10f(static_cast<float>(depth)) +
-                    20.0f * af_distance;
+    // Calculate likelihoods for different genotypes
+    // P(data | hom ref)
+    float p_data_hom_ref = binomial_probability(
+        static_cast<uint32_t>(allele_frequency * depth), depth, error_rate
+    );
+
+    // P(data | het)
+    float p_data_het = binomial_probability(
+        static_cast<uint32_t>(allele_frequency * depth), depth, 0.5f
+    );
+
+    // P(data | hom alt)
+    float p_data_hom_alt = binomial_probability(
+        static_cast<uint32_t>(allele_frequency * depth), depth, 1.0f - error_rate
+    );
+
+    // Determine most likely genotype
+    float max_likelihood = fmaxf(p_data_hom_ref, fmaxf(p_data_het, p_data_hom_alt));
+
+    // Alternative likelihood (second best)
+    float alt_likelihood;
+    if (max_likelihood == p_data_hom_ref) {
+        alt_likelihood = fmaxf(p_data_het, p_data_hom_alt);
+    } else if (max_likelihood == p_data_het) {
+        alt_likelihood = fmaxf(p_data_hom_ref, p_data_hom_alt);
+    } else {
+        alt_likelihood = fmaxf(p_data_hom_ref, p_data_het);
+    }
+
+    // Quality is based on likelihood ratio
+    float quality;
+    if (alt_likelihood > 1e-10f) {
+        float likelihood_ratio = max_likelihood / alt_likelihood;
+        quality = -10.0f * log10f(1.0f / fmaxf(likelihood_ratio, 1.0f));
+    } else {
+        // Very confident - use depth-based quality
+        quality = 10.0f * log10f(static_cast<float>(depth));
+    }
 
     // Cap at 60 (standard max PHRED quality)
     quality = fminf(quality, 60.0f);
