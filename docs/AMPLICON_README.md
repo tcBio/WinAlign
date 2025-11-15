@@ -6,7 +6,7 @@
 
 ## Overview
 
-WinAlign-Amplicon is a specialized variant of WinAlign designed for processing amplicon sequencing data (e.g., Phylos cannabis genotyping panels). Unlike whole genome sequencing (WGS), amplicon data requires different optimization strategies focused on read deduplication and position-specific variant calling.
+WinAlign-Amplicon is a specialized variant of WinAlign designed for processing amplicon sequencing data (e.g., cannabis genotyping panels). Unlike whole genome sequencing (WGS), amplicon data requires different optimization strategies focused on read deduplication and position-specific variant calling.
 
 **This is a SEPARATE tool from WinAlign-GPU**, sharing infrastructure but implementing amplicon-specific algorithms.
 
@@ -27,7 +27,7 @@ WinAlign-Amplicon is a specialized variant of WinAlign designed for processing a
 
 **Use WinAlign-Amplicon for:**
 - ✅ PCR-amplified target sequencing
-- ✅ Genotyping panels (e.g., Phylos)
+- ✅ Genotyping panels
 - ✅ Known marker positions
 - ✅ High coverage (>1,000x) at specific loci
 
@@ -46,13 +46,13 @@ WinAlign-Amplicon is a specialized variant of WinAlign designed for processing a
 Create a YAML configuration file:
 
 ```yaml
-# phylos_panel.yaml
+# amplicon_panel.yaml
 amplicon_panel:
-  name: "Phylos Cannabis Genotyping Panel v2.0"
+  name: "Example Cannabis Genotyping Panel v2.0"
   reference: "cannabis_sativa_cs10.fasta"
 
 targets:
-  - amplicon_id: "PHYLOS_SNP_0001"
+  - amplicon_id: "MARKER_0001"
     chromosome: "chr1"
     start: 12345
     end: 12545
@@ -60,7 +60,7 @@ targets:
     primer_rev: "GCTAGCTAGCTAGCTA"
     snp_positions: [12400, 12450]
 
-  - amplicon_id: "PHYLOS_SNP_0002"
+  - amplicon_id: "MARKER_0002"
     chromosome: "chr2"
     start: 54321
     end: 54521
@@ -85,23 +85,23 @@ output:
 
 ```bash
 winalign-amplicon \
-  --config phylos_panel.yaml \
-  --input phylos_samples.fastq.gz \
-  --output phylos_genotypes.vcf \
-  --stats phylos_qc.json
+  --config amplicon_panel.yaml \
+  --input amplicon_samples.fastq.gz \
+  --output amplicon_genotypes.vcf \
+  --stats amplicon_qc.json
 ```
 
 ### 3. View Results
 
 ```bash
 # View VCF
-bcftools view phylos_genotypes.vcf | less
+bcftools view amplicon_genotypes.vcf | less
 
 # Summary statistics
-cat phylos_qc.json
+cat amplicon_qc.json
 
 # Per-amplicon coverage
-bcftools query -f '%AMP\t%DP\n' phylos_genotypes.vcf | \
+bcftools query -f '%AMP\t%DP\n' amplicon_genotypes.vcf | \
   awk '{sum[$1]+=$2; count[$1]++} END {for (amp in sum) print amp, sum[amp]/count[amp]}'
 ```
 
@@ -119,7 +119,7 @@ bcftools query -f '%AMP\t%DP\n' phylos_genotypes.vcf | \
 ##INFO=<ID=RD,Number=1,Type=Integer,Description="Reference depth">
 ##INFO=<ID=AD,Number=1,Type=Integer,Description="Alternate depth">
 #CHROM  POS     ID              REF ALT QUAL FILTER INFO
-chr1    12400   PHYLOS_SNP_0001 A   G   60   PASS   AMP=PHYLOS_SNP_0001;DP=15234;AF=0.48;RD=7921;AD=7313
+chr1    12400   MARKER_0001     A   G   60   PASS   AMP=MARKER_0001;DP=15234;AF=0.48;RD=7921;AD=7313
 ```
 
 ### QC Statistics (JSON)
@@ -136,7 +136,7 @@ chr1    12400   PHYLOS_SNP_0001 A   G   60   PASS   AMP=PHYLOS_SNP_0001;DP=15234
   },
   "amplicon_stats": [
     {
-      "amplicon_id": "PHYLOS_SNP_0001",
+      "amplicon_id": "MARKER_0001",
       "total_reads": 12450,
       "unique_sequences": 87,
       "mean_coverage": 15234,
@@ -210,18 +210,18 @@ Stage 6: VCF Output
 WinAlign-Amplicon produces VCF files compatible with the relatedness analysis pipeline:
 
 ```bash
-# Process Phylos data
-winalign-amplicon -c phylos_panel.yaml -i phylos.fastq.gz -o phylos.vcf
+# Process amplicon data
+winalign-amplicon -c amplicon_panel.yaml -i amplicon_reads.fastq.gz -o amplicon_genotypes.vcf
 
 # Process your WGS data
 winalign-gpu -r ref.fa -1 wgs_R1.fq -2 wgs_R2.fq -o wgs.bam
 bcftools mpileup -f ref.fa wgs.bam | bcftools call -mv > wgs.vcf
 
 # Compare at overlapping markers
-bcftools isec -p isec_dir phylos.vcf wgs.vcf
+bcftools isec -p isec_dir amplicon_genotypes.vcf wgs.vcf
 
 # Run relatedness analysis
-python calculate_relatedness.py --vcf1 phylos.vcf --vcf2 wgs.vcf
+python calculate_relatedness.py --vcf1 amplicon_genotypes.vcf --vcf2 wgs.vcf
 ```
 
 ---

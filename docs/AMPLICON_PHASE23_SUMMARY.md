@@ -131,7 +131,7 @@ quality = 10 * log10(depth) + 20 * |AF - 0.5|
 ##INFO=<ID=KNOWN,Number=0,Type=Flag,Description="Known marker position">
 
 #CHROM  POS     ID              REF ALT QUAL FILTER INFO                                    FORMAT  sample_001
-chr1    12400   PHYLOS_SNP_0001 A   G   60   PASS   AMP=PHYLOS_SNP_0001;DP=15234;AF=0.48;RD=7921;AD=7313  GT:DP:AD:AF   0/1:15234:7921,7313:0.480
+chr1    12400   MARKER_0001     A   G   60   PASS   AMP=MARKER_0001;DP=15234;AF=0.48;RD=7921;AD=7313  GT:DP:AD:AF   0/1:15234:7921,7313:0.480
 ```
 
 **Amplicon-Specific Features**:
@@ -310,12 +310,12 @@ Stage 5: Finalize (90% → 100%)
 **Complete Workflow**:
 
 ```bash
-# Step 1: Process Phylos amplicon data
+# Step 1: Process amplicon data
 winalign-amplicon \
-  -c phylos_panel.yaml \
-  -i phylos_reads.fastq.gz \
-  -o phylos_genotypes.vcf \
-  -s phylos_stats.json
+  -c amplicon_panel.yaml \
+  -i amplicon_reads.fastq.gz \
+  -o amplicon_genotypes.vcf \
+  -s amplicon_stats.json
 
 # Step 2: Process your WGS data
 winalign-gpu \
@@ -327,12 +327,12 @@ winalign-gpu \
 bcftools mpileup -f cannabis_ref.fasta wgs_alignments.bam | \
 bcftools call -mv -Oz -o wgs_variants.vcf.gz
 
-# Step 3: Extract WGS genotypes at Phylos marker positions
-bcftools view -R phylos_markers.bed wgs_variants.vcf.gz > wgs_at_markers.vcf
+# Step 3: Extract WGS genotypes at marker positions
+bcftools view -R amplicon_markers.bed wgs_variants.vcf.gz > wgs_at_markers.vcf
 
 # Step 4: Run relatedness analysis
 python calculate_relatedness.py \
-  --vcf1 phylos_genotypes.vcf \
+  --vcf1 amplicon_genotypes.vcf \
   --vcf2 wgs_at_markers.vcf \
   --output relatedness_report.html
 ```
@@ -389,7 +389,7 @@ python calculate_relatedness.py \
 - [ ] Add multi-sample support
 - [ ] Improve quality model
 - [ ] Memory pooling for GPU
-- [ ] Comprehensive testing with real Phylos data
+- [ ] Comprehensive testing with real amplicon data
 - [ ] Benchmarking vs BWA-MEM/DADA2
 - [ ] Documentation finalization
 
@@ -412,7 +412,7 @@ The WinAlign-Amplicon pipeline now provides:
 - **Works**: Read processing, variant calling, VCF output
 - **Needs work**: Real alignment, multi-sample, testing
 
-**Can process Phylos data**: YES (with some caveats)
+**Can process amplicon data**: YES (with some caveats)
 - Alignment step is simplified (position-based, not sequence-based)
 - Suitable for marker genotyping
 - Needs validation against known genotypes
@@ -420,7 +420,7 @@ The WinAlign-Amplicon pipeline now provides:
 **Integration with relatedness analysis**: READY
 - Produces standard VCF format
 - Compatible with bcftools, plink, custom scripts
-- Enables Phylos vs WGS comparison
+- Enables amplicon vs WGS comparison
 
 ---
 
@@ -440,34 +440,34 @@ The WinAlign-Amplicon pipeline now provides:
 
 ```bash
 # Create example config
-winalign-amplicon --create-config phylos_panel.yaml
+winalign-amplicon --create-config amplicon_panel.yaml
 
-# Edit phylos_panel.yaml to add your amplicon definitions
+# Edit amplicon_panel.yaml to add your amplicon definitions
 
 # Run pipeline
 winalign-amplicon \
-  -c phylos_panel.yaml \
-  -i phylos_reads.fastq.gz \
-  -o phylos_genotypes.vcf \
-  -s phylos_qc.json \
+  -c amplicon_panel.yaml \
+  -i amplicon_reads.fastq.gz \
+  -o amplicon_genotypes.vcf \
+  -s amplicon_qc.json \
   --gpu-id 0 \
   --batch-size 10000
 
 # View output
-bcftools view phylos_genotypes.vcf | head -20
-cat phylos_qc.json
+bcftools view amplicon_genotypes.vcf | head -20
+cat amplicon_qc.json
 ```
 
 **Expected Output**:
 ```
 === WinAlign-Amplicon v0.1.0 ===
 
-[1/5] Loading configuration: phylos_panel.yaml
-  Panel: Phylos Cannabis Genotyping Panel
+[1/5] Loading configuration: amplicon_panel.yaml
+  Panel: Example Cannabis Genotyping Panel
   Targets: 127 amplicons
   Reference: cannabis_sativa.fasta
-  Input: phylos_reads.fastq.gz
-  Output: phylos_genotypes.vcf
+  Input: amplicon_reads.fastq.gz
+  Output: amplicon_genotypes.vcf
 
 [2/5] Initializing pipeline...
 [3/5] Processing amplicon data...
@@ -486,11 +486,11 @@ cat phylos_qc.json
   Variants called:      127
 
 Output files:
-  VCF: phylos_genotypes.vcf
-  Statistics: phylos_qc.json
+  VCF: amplicon_genotypes.vcf
+  Statistics: amplicon_qc.json
 ```
 
 ---
 
 **Branch**: `claude/amplicon-support-01AbyKEKti47e6fs8suZWNyT`
-**Ready for**: Production testing with real Phylos data
+**Ready for**: Production testing with real amplicon data

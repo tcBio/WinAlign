@@ -2,13 +2,13 @@
 
 **Version**: 0.1.0
 **Status**: Design Phase
-**Target**: Phylos-style amplicon sequencing data
+**Target**: Amplicon sequencing data
 
 ---
 
 ## Overview
 
-WinAlign-Amplicon is a specialized variant of the WinAlign pipeline optimized for amplicon sequencing data (e.g., Phylos cannabis genotyping panels). Unlike WGS data, amplicon data has unique characteristics that require a different processing strategy.
+WinAlign-Amplicon is a specialized variant of the WinAlign pipeline optimized for amplicon sequencing data (e.g., cannabis genotyping panels). Unlike WGS data, amplicon data has unique characteristics that require a different processing strategy.
 
 **This tool is SEPARATE from the main WinAlign-GPU WGS pipeline.**
 
@@ -91,7 +91,7 @@ WinAlign-Amplicon (EFFICIENT):
 
 ```cpp
 struct AmpliconTarget {
-    std::string amplicon_id;        // e.g., "PHYLOS_SNP_0001"
+    std::string amplicon_id;        // e.g., "MARKER_0001"
     std::string chromosome;         // e.g., "chr1"
     uint64_t start;                 // 0-based start position
     uint64_t end;                   // 0-based end position
@@ -266,12 +266,12 @@ __global__ void generate_pileup_kernel(
 # amplicon_config.yaml
 
 amplicon_panel:
-  name: "Phylos Cannabis Genotyping Panel"
+  name: "Example Cannabis Genotyping Panel"
   version: "v2.0"
   reference: "cannabis_sativa_cs10.fasta"
 
 targets:
-  - amplicon_id: "PHYLOS_SNP_0001"
+  - amplicon_id: "MARKER_0001"
     chromosome: "chr1"
     start: 12345
     end: 12545
@@ -279,7 +279,7 @@ targets:
     primer_rev: "GCTAGCTAGCTA"
     snp_positions: [12400, 12450]
 
-  - amplicon_id: "PHYLOS_SNP_0002"
+  - amplicon_id: "MARKER_0002"
     chromosome: "chr2"
     start: 54321
     end: 54521
@@ -316,8 +316,8 @@ output:
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
 ##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read depth">
 #CHROM  POS     ID              REF ALT QUAL FILTER INFO                                    FORMAT  sample_001
-chr1    12400   PHYLOS_SNP_0001 A   G   60   PASS   AMP=PHYLOS_SNP_0001;DP=15234;AF=0.48;RD=7921;AD=7313  GT:DP   0/1:15234
-chr2    54400   PHYLOS_SNP_0002 C   T   60   PASS   AMP=PHYLOS_SNP_0002;DP=22145;AF=0.99;RD=221;AD=21924   GT:DP   1/1:22145
+chr1    12400   MARKER_0001     A   G   60   PASS   AMP=MARKER_0001;DP=15234;AF=0.48;RD=7921;AD=7313  GT:DP   0/1:15234
+chr2    54400   MARKER_0002     C   T   60   PASS   AMP=MARKER_0002;DP=22145;AF=0.99;RD=221;AD=21924   GT:DP   1/1:22145
 ```
 
 ---
@@ -372,7 +372,7 @@ chr2    54400   PHYLOS_SNP_0002 C   T   60   PASS   AMP=PHYLOS_SNP_0002;DP=22145
 
 ### Phase 4: Integration & Testing (Week 5-6)
 - [ ] Unit tests for all components
-- [ ] Integration tests with Phylos data
+- [ ] Integration tests with amplicon data
 - [ ] Benchmarking vs existing tools (DADA2, etc.)
 - [ ] Documentation and examples
 
@@ -401,15 +401,15 @@ chr2    54400   PHYLOS_SNP_0002 C   T   60   PASS   AMP=PHYLOS_SNP_0002;DP=22145
 This tool produces VCF output compatible with the relatedness analysis pipeline:
 
 ```bash
-# Process Phylos amplicon data
-winalign-amplicon -c phylos_panel.yaml -i phylos.fastq.gz -o phylos.vcf
+# Process amplicon data
+winalign-amplicon -c amplicon_panel.yaml -i amplicon_reads.fastq.gz -o amplicon_genotypes.vcf
 
 # Process your panel (WGS)
 winalign-gpu -r ref.fa -1 wgs_R1.fq -2 wgs_R2.fq -o wgs.bam
 bcftools mpileup -f ref.fa wgs.bam | bcftools call -mv > wgs.vcf
 
 # Run relatedness analysis
-python calculate_relatedness.py --vcf1 phylos.vcf --vcf2 wgs.vcf
+python calculate_relatedness.py --vcf1 amplicon_genotypes.vcf --vcf2 wgs.vcf
 ```
 
 ---
@@ -447,7 +447,7 @@ python calculate_relatedness.py --vcf1 phylos.vcf --vcf2 wgs.vcf
 
 ### Integration Tests
 - End-to-end with synthetic amplicon data
-- Phylos dataset processing
+- Real amplicon dataset processing
 - Multi-sample batch processing
 
 ### Validation
@@ -472,7 +472,6 @@ python calculate_relatedness.py --vcf1 phylos.vcf --vcf2 wgs.vcf
 
 ## References
 
-- Phylos Bioscience genotyping methodology
 - DADA2: High-resolution sample inference from Illumina amplicon data
 - BWA-MEM: Fast and accurate long-read alignment
 - WinAlign-GPU architecture document

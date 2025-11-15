@@ -14,7 +14,7 @@ namespace amplicon {
  * Represents a single amplicon region with primers and expected SNP positions
  */
 struct AmpliconTarget {
-    std::string amplicon_id;              // Unique identifier (e.g., "PHYLOS_SNP_0001")
+    std::string amplicon_id;              // Unique identifier (e.g., "MARKER_0001")
     std::string chromosome;               // Chromosome name
     uint64_t start;                       // 0-based start position
     uint64_t end;                         // 0-based end position

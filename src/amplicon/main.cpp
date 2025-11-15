@@ -23,7 +23,7 @@ void print_usage(const char* program_name) {
     std::cout << "  -h, --help             Show this help message\n\n";
     std::cout << "Examples:\n";
     std::cout << "  # Basic usage\n";
-    std::cout << "  " << program_name << " -c phylos.yaml -i reads.fastq.gz -o genotypes.vcf\n\n";
+    std::cout << "  " << program_name << " -c panel.yaml -i reads.fastq.gz -o genotypes.vcf\n\n";
     std::cout << "  # With statistics\n";
     std::cout << "  " << program_name << " -c panel.yaml -i reads.fq -o out.vcf -s qc.json\n\n";
     std::cout << "  # Create example config\n";
