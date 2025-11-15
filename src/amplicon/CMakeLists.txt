@@ -5,6 +5,7 @@ add_library(winalign_amplicon_cuda STATIC
     cuda/pileup.cu
     cuda/variant_calling.cu
     cuda/memory_pool.cu
+    cuda/multi_gpu.cu
 )
 
 target_include_directories(winalign_amplicon_cuda PUBLIC
@@ -31,6 +32,9 @@ add_library(winalign_amplicon STATIC
     smith_waterman.cpp
     primer_trimmer.cpp
     chimera_detector.cpp
+    barcode_demux.cpp
+    multi_sample_vcf.cpp
+    realtime_processor.cpp
 )
 
 target_include_directories(winalign_amplicon PUBLIC
