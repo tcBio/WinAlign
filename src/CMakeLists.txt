@@ -3,6 +3,11 @@ add_subdirectory(core)
 add_subdirectory(cpu)
 add_subdirectory(cuda)
 
+# Amplicon tool (optional)
+if(BUILD_AMPLICON)
+    add_subdirectory(amplicon)
+endif()
+
 # Main WinAlign library
 add_library(winalign STATIC
     $<TARGET_OBJECTS:winalign_core>
