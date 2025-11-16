@@ -120,7 +120,12 @@ cudaError_t copy_fm_index_to_device(
 );
 
 /**
- * @brief Generate seeds using the FM-index entirely on the GPU.
+ * @brief Generate seeds using optimized FM-index on GPU (Phase 4)
+ *
+ * Optimized version with:
+ * - Shared memory caching of BWT for faster access
+ * - Repetitive seed filtering (min/max hit thresholds)
+ * - Improved memory access patterns
  *
  * @param reads Read batch residing on the GPU
  * @param fm_index FM-index buffers on the GPU
@@ -130,6 +135,34 @@ cudaError_t copy_fm_index_to_device(
  * @param step Step size between successive k-mers
  * @param stream CUDA stream for asynchronous execution
  * @param out_total_seeds Receives the number of valid seeds written
+ * @return cudaError_t CUDA error code
+ */
+cudaError_t generate_gpu_seeds_optimized(
+    const ReadBatch& reads,
+    const FMIndex& fm_index,
+    Seed* seeds,
+    uint32_t max_seeds_per_read,
+    uint32_t kmer_size,
+    uint32_t step,
+    uint32_t& out_total_seeds,
+    cudaStream_t stream = 0
+);
+
+/**
+ * @brief Generate seeds using the FM-index entirely on the GPU.
+ *
+ * Automatically uses optimized version (Phase 4) by default.
+ * Falls back to original kernel if needed.
+ *
+ * @param reads Read batch residing on the GPU
+ * @param fm_index FM-index buffers on the GPU
+ * @param seeds Destination seed buffer (capacity: num_reads * max_seeds_per_read)
+ * @param max_seeds_per_read Maximum seeds emitted per read
+ * @param kmer_size Seed length
+ * @param step Step size between successive k-mers
+ * @param stream CUDA stream for asynchronous execution
+ * @param out_total_seeds Receives the number of valid seeds written
+ * @return cudaError_t CUDA error code
  */
 cudaError_t generate_gpu_seeds(
     const ReadBatch& reads,
