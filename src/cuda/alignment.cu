@@ -18,6 +18,197 @@ __device__ inline int32_t max3(int32_t a, int32_t b, int32_t c) {
     return max(max(a, b), c);
 }
 
+// ===== PHASE 3: Warp-Optimized Banded Smith-Waterman =====
+
+// Warp-optimized banded SW kernel - one warp (32 threads) per alignment
+// Uses banded DP for better performance and memory efficiency
+__global__ void smith_waterman_banded_warp_kernel(
+    const char* reads,
+    const uint32_t* read_offsets,
+    const uint32_t* read_lengths,
+    const Seed* seeds,
+    uint32_t num_seeds,
+    const char* reference,
+    uint64_t ref_length,
+    SWParams params,
+    AlignmentResult* results,
+    uint32_t band_width  // Half-width of the band (e.g., 64 means ±64 diagonal)
+) {
+    // One warp per alignment
+    const uint32_t WARP_SIZE = 32;
+    uint32_t warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
+    uint32_t lane_id = threadIdx.x % WARP_SIZE;
+
+    if (warp_id >= num_seeds) return;
+
+    // Get seed and read info
+    const Seed& seed = seeds[warp_id];
+    uint32_t read_id = seed.read_id;
+    uint32_t read_offset = read_offsets[read_id];
+    uint32_t read_len = read_lengths[read_id];
+
+    const char* read = reads + read_offset;
+    uint64_t ref_pos = seed.position;
+
+    // Bounds check
+    if (ref_pos >= ref_length) {
+        if (lane_id == 0) {
+            results[warp_id].score = 0;
+            results[warp_id].position = 0;
+            results[warp_id].read_id = read_id;
+            results[warp_id].read_length = read_len;
+        }
+        return;
+    }
+
+    // Extension window around seed
+    const uint32_t FLANK = 100;
+    uint64_t ref_start = (ref_pos > FLANK) ? (ref_pos - FLANK) : 0;
+    uint64_t ref_end = min(ref_pos + read_len + FLANK, ref_length);
+    uint32_t ref_win_len = ref_end - ref_start;
+    const char* ref_win = reference + ref_start;
+
+    // Shared memory for band DP (2 rows: current and previous)
+    extern __shared__ int32_t shared_mem[];
+    int32_t* H_curr = shared_mem + (threadIdx.x / WARP_SIZE) * (band_width * 2 + 1) * 2;
+    int32_t* H_prev = H_curr + (band_width * 2 + 1);
+
+    // Initialize band
+    const uint32_t band_size = band_width * 2 + 1;
+    const int32_t NEG_INF = -1000000000;
+
+    for (uint32_t k = lane_id; k < band_size; k += WARP_SIZE) {
+        H_curr[k] = 0;
+        H_prev[k] = 0;
+    }
+    __syncwarp();
+
+    int32_t best_score = 0;
+    uint32_t best_i = 0, best_j = 0;
+
+    // Banded DP: Process each row of the read
+    for (uint32_t i = 1; i <= read_len && i <= 512; ++i) {
+        char read_base = read[i - 1];
+
+        // Swap buffers
+        int32_t* tmp = H_prev;
+        H_prev = H_curr;
+        H_curr = tmp;
+
+        // For row i, we process columns in the band: [i - band_width, i + band_width]
+        // But clamp to [1, ref_win_len]
+        int32_t j_min = max(1, (int32_t)i - (int32_t)band_width);
+        int32_t j_max = min((int32_t)ref_win_len, (int32_t)i + (int32_t)band_width);
+
+        // Each thread in warp handles multiple cells in the band
+        for (int32_t j = j_min + lane_id; j <= j_max; j += WARP_SIZE) {
+            if (j < 1 || j > (int32_t)ref_win_len) continue;
+
+            char ref_base = ref_win[j - 1];
+
+            // Band index for current position
+            int32_t band_idx = j - (int32_t)i + (int32_t)band_width;
+            if (band_idx < 0 || band_idx >= (int32_t)band_size) continue;
+
+            // Get values from previous row/column using warp shuffle
+            int32_t diag_val = 0;
+            int32_t up_val = 0;
+            int32_t left_val = 0;
+
+            // Diagonal (i-1, j-1)
+            int32_t prev_band_idx = band_idx; // Same band position in previous row
+            if (prev_band_idx >= 0 && prev_band_idx < (int32_t)band_size) {
+                diag_val = H_prev[prev_band_idx];
+            }
+
+            // Up (i-1, j)
+            int32_t up_band_idx = band_idx + 1; // One position right in band
+            if (up_band_idx >= 0 && up_band_idx < (int32_t)band_size) {
+                up_val = H_prev[up_band_idx];
+            } else {
+                up_val = NEG_INF;
+            }
+
+            // Left (i, j-1) - need value from same row, previous column
+            if (j > j_min) {
+                // Use warp shuffle to get from adjacent thread
+                left_val = __shfl_up_sync(0xFFFFFFFF, H_curr[band_idx], 1);
+                if (lane_id == 0 || j == j_min) {
+                    // First thread or leftmost in band - use value from band
+                    int32_t left_band_idx = band_idx - 1;
+                    if (left_band_idx >= 0 && left_band_idx < (int32_t)band_size) {
+                        left_val = H_curr[left_band_idx];
+                    } else {
+                        left_val = 0;
+                    }
+                }
+            } else {
+                left_val = 0;
+            }
+
+            // Compute match/mismatch score
+            int32_t match = diag_val + match_score(read_base, ref_base, params);
+
+            // Gap penalties (simplified affine - can be enhanced)
+            int32_t gap_up = up_val + params.gap_open;
+            int32_t gap_left = left_val + params.gap_open;
+
+            // SW local alignment: max(0, match, gaps)
+            int32_t score = max3(0, match, max(gap_up, gap_left));
+
+            // Store in current band
+            H_curr[band_idx] = score;
+
+            // Track best score (will reduce across warp later)
+            if (score > best_score) {
+                best_score = score;
+                best_i = i;
+                best_j = j;
+            }
+        }
+
+        __syncwarp();
+    }
+
+    // Warp reduction to find global best score
+    int32_t warp_best_score = best_score;
+    uint32_t warp_best_i = best_i;
+    uint32_t warp_best_j = best_j;
+
+    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+        int32_t other_score = __shfl_down_sync(0xFFFFFFFF, warp_best_score, offset);
+        uint32_t other_i = __shfl_down_sync(0xFFFFFFFF, warp_best_i, offset);
+        uint32_t other_j = __shfl_down_sync(0xFFFFFFFF, warp_best_j, offset);
+
+        if (other_score > warp_best_score) {
+            warp_best_score = other_score;
+            warp_best_i = other_i;
+            warp_best_j = other_j;
+        }
+    }
+
+    // Lane 0 writes the result
+    if (lane_id == 0) {
+        uint64_t align_start = ref_start;
+        if (warp_best_j > warp_best_i) {
+            align_start = ref_start + (warp_best_j - warp_best_i);
+        }
+        if (align_start >= ref_length) {
+            align_start = (ref_length > 0) ? (ref_length - 1) : 0;
+        }
+
+        results[warp_id].read_id = read_id;
+        results[warp_id].read_length = read_len;
+        results[warp_id].position = align_start;
+        results[warp_id].score = warp_best_score;
+        results[warp_id].cigar_length = 0;
+        results[warp_id].flag = 0;
+        results[warp_id].mapping_quality = (warp_best_score > 0) ? min(60, warp_best_score / 2) : 0;
+    }
+}
+
+// ===== Original Smith-Waterman kernel (kept for fallback) =====
+
 // Smith-Waterman alignment kernel - one thread per alignment
 __global__ void smith_waterman_kernel(
     const char* reads,
@@ -198,6 +389,53 @@ __global__ void calculate_mapq_kernel(
     }
 }
 
+// ===== PHASE 3: Host function for warp-optimized banded SW =====
+
+// Host function: Launch warp-optimized banded Smith-Waterman
+cudaError_t smith_waterman_align_banded_warp(
+    const ReadBatch& reads,
+    const Seed* seeds,
+    uint32_t num_seeds,
+    const char* reference,
+    uint64_t ref_length,
+    const SWParams& params,
+    AlignmentResult* results,
+    uint32_t band_width,
+    cudaStream_t stream
+) {
+    if (num_seeds == 0) return cudaSuccess;
+
+    // One warp (32 threads) per alignment
+    const uint32_t WARP_SIZE = 32;
+    const uint32_t WARPS_PER_BLOCK = 8;  // 256 threads per block = 8 warps
+
+    dim3 block_size(WARPS_PER_BLOCK * WARP_SIZE);  // 256 threads
+    dim3 grid_size((num_seeds + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK);
+
+    // Calculate shared memory size per warp
+    // Each warp needs: (band_width * 2 + 1) * 2 * sizeof(int32_t)
+    uint32_t band_size = band_width * 2 + 1;
+    size_t shared_mem_per_warp = band_size * 2 * sizeof(int32_t);
+    size_t shared_mem_total = shared_mem_per_warp * WARPS_PER_BLOCK;
+
+    smith_waterman_banded_warp_kernel<<<grid_size, block_size, shared_mem_total, stream>>>(
+        reads.sequences,
+        reads.offsets,
+        reads.lengths,
+        seeds,
+        num_seeds,
+        reference,
+        ref_length,
+        params,
+        results,
+        band_width
+    );
+
+    return cudaGetLastError();
+}
+
+// ===== Original host function (kept for compatibility) =====
+
 // Host function: Launch Smith-Waterman alignment
 cudaError_t smith_waterman_align(
     const ReadBatch& reads,
@@ -211,6 +449,25 @@ cudaError_t smith_waterman_align(
 ) {
     if (num_seeds == 0) return cudaSuccess;
 
+    // Use banded warp kernel by default (Phase 3 optimization)
+    // Falls back to original kernel if band width would be too large
+    const uint32_t DEFAULT_BAND_WIDTH = 64;  // ±64 diagonal
+
+    // Check if we can use banded kernel
+    // Max shared memory is typically 48-96 KB, we use 64 as safe default
+    uint32_t band_size = DEFAULT_BAND_WIDTH * 2 + 1;
+    size_t shared_mem_per_warp = band_size * 2 * sizeof(int32_t);
+    size_t shared_mem_total = shared_mem_per_warp * 8;  // 8 warps per block
+
+    // Use banded warp kernel if shared memory requirement is reasonable
+    if (shared_mem_total <= 32768) {  // 32 KB is conservative limit
+        return smith_waterman_align_banded_warp(
+            reads, seeds, num_seeds, reference, ref_length,
+            params, results, DEFAULT_BAND_WIDTH, stream
+        );
+    }
+
+    // Fallback to original kernel for very wide bands or low-memory GPUs
     dim3 block_size(256);
     dim3 grid_size((num_seeds + block_size.x - 1) / block_size.x);
 

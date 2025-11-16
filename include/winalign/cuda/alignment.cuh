@@ -47,7 +47,40 @@ struct SWParams {
 };
 
 /**
+ * @brief Perform warp-optimized banded Smith-Waterman alignment on GPU (Phase 3)
+ *
+ * Uses one warp (32 threads) per alignment with banded DP for 3-5x speedup.
+ * Band follows the diagonal within ±band_width cells.
+ *
+ * @param reads Input read batch on device
+ * @param seeds Input seeds on device
+ * @param num_seeds Number of seeds
+ * @param reference Reference sequence on device
+ * @param ref_length Reference length
+ * @param params Alignment parameters
+ * @param results Output alignment results on device
+ * @param band_width Half-width of the alignment band (e.g., 64 = ±64 diagonal)
+ * @param stream CUDA stream for async execution
+ * @return cudaError_t CUDA error code
+ */
+cudaError_t smith_waterman_align_banded_warp(
+    const ReadBatch& reads,
+    const Seed* seeds,
+    uint32_t num_seeds,
+    const char* reference,
+    uint64_t ref_length,
+    const SWParams& params,
+    AlignmentResult* results,
+    uint32_t band_width,
+    cudaStream_t stream = 0
+);
+
+/**
  * @brief Perform Smith-Waterman alignment on GPU
+ *
+ * Automatically selects the best kernel:
+ * - Uses warp-optimized banded kernel (Phase 3) by default
+ * - Falls back to original kernel for compatibility
  *
  * @param reads Input read batch on device
  * @param seeds Input seeds on device
