@@ -1,6 +1,7 @@
 # CPU-side components
 add_library(winalign_cpu OBJECT
     fastq_parser.cpp
+    fastq_worker.cpp
     reference_loader.cpp
     bam_writer.cpp
     fm_index.cpp

@@ -38,6 +38,9 @@ struct PipelineConfig {
     bool sort_output = true;
     bool create_index = true;
     bool use_gpu = true;
+    // Fast behavior is the default: avoid expensive CPU fallbacks when GPU
+    // alignment fails. A future "slow/accurate" mode could re-enable them.
+    bool fast_mode = true;
     std::string log_file;
 
     // Validation

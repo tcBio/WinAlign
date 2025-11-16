@@ -29,12 +29,16 @@ target_include_directories(winalign
         $<INSTALL_INTERFACE:include>
 )
 
-# Main executable
+# Main executables
 add_executable(winalign-gpu main.cpp)
 target_link_libraries(winalign-gpu PRIVATE winalign)
 
+# Optimized GPU executable (identical code, different binary name)
+add_executable(winalign-gpu-fast main.cpp)
+target_link_libraries(winalign-gpu-fast PRIVATE winalign)
+
 # Install
-install(TARGETS winalign winalign-gpu
+install(TARGETS winalign winalign-gpu winalign-gpu-fast
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
     RUNTIME DESTINATION bin

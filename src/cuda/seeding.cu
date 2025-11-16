@@ -188,7 +188,7 @@ cudaError_t generate_gpu_seeds(
     const uint32_t block_size = 128;
     dim3 block(block_size);
     dim3 grid((num_reads + block_size - 1) / block_size);
-    const uint32_t max_hits_per_seed = 4;
+    const uint32_t max_hits_per_seed = 8;
 
     cudaError_t err = cudaMalloc(&d_tmp_seeds, total_slots * sizeof(Seed));
     if (err != cudaSuccess) goto cleanup;

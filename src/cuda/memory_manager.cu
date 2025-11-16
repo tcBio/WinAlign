@@ -52,11 +52,17 @@ public:
     void cleanup() {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        // Free all allocated memory
+        // Free all active allocations
         for (auto& [ptr, size] : allocations_) {
             cudaFree(ptr);
         }
         allocations_.clear();
+
+        // Free all pooled blocks
+        for (auto& [size, ptr] : free_blocks_) {
+            cudaFree(ptr);
+        }
+        free_blocks_.clear();
 
         // Free all pinned memory
         for (auto& [ptr, size] : pinned_allocations_) {
@@ -68,19 +74,36 @@ public:
     }
 
     cudaError_t allocate(size_t size, void** ptr) {
-        if (!ptr) {
+        if (!ptr || size == 0) {
             return cudaErrorInvalidValue;
         }
 
-        cudaError_t err = cudaMalloc(ptr, size);
+        // Try to reuse a pooled block first
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = free_blocks_.lower_bound(size);
+            if (it != free_blocks_.end()) {
+                void* dev_ptr = it->second;
+                size_t block_size = it->first;
+                free_blocks_.erase(it);
+                allocations_[dev_ptr] = block_size;
+                allocated_memory_ += block_size;
+                *ptr = dev_ptr;
+                return cudaSuccess;
+            }
+        }
+
+        // No suitable pooled block; allocate fresh
+        void* dev_ptr = nullptr;
+        cudaError_t err = cudaMalloc(&dev_ptr, size);
         if (err != cudaSuccess) {
             return err;
         }
 
         std::lock_guard<std::mutex> lock(mutex_);
-        allocations_[*ptr] = size;
+        allocations_[dev_ptr] = size;
         allocated_memory_ += size;
-
+        *ptr = dev_ptr;
         return cudaSuccess;
     }
 
@@ -89,16 +112,17 @@ public:
             return cudaSuccess;
         }
 
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            auto it = allocations_.find(ptr);
-            if (it != allocations_.end()) {
-                allocated_memory_ -= it->second;
-                allocations_.erase(it);
-            }
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = allocations_.find(ptr);
+        if (it != allocations_.end()) {
+            size_t size = it->second;
+            allocated_memory_ -= size;
+            allocations_.erase(it);
+            // Keep block in a simple pool for reuse
+            free_blocks_.emplace(size, ptr);
         }
 
-        return cudaFree(ptr);
+        return cudaSuccess;
     }
 
     cudaError_t copy_to_device(void* dst, const void* src, size_t size,
@@ -172,6 +196,7 @@ private:
     size_t allocated_memory_;
 
     std::map<void*, size_t> allocations_;
+    std::multimap<size_t, void*> free_blocks_;
     std::map<void*, size_t> pinned_allocations_;
     mutable std::mutex mutex_;
 };

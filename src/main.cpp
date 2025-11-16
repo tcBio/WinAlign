@@ -217,6 +217,7 @@ int main(int argc, char* argv[]) {
     logger.set_log_file(config.log_file);
     logger.info("WinAlign-GPU starting");
     logger.info(std::string("Mode: ") + (config.use_gpu ? "GPU" : "CPU-only"));
+    logger.info(std::string("Fast mode: ") + (config.fast_mode ? "enabled" : "disabled"));
     logger.info("Reference: " + config.reference_fasta);
     logger.info("Read1: " + config.read1_fastq +
                 (config.read2_fastq.empty() ? "" : " Read2: " + config.read2_fastq));

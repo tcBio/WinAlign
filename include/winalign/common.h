@@ -20,7 +20,9 @@ using QualityScore = uint8_t;
 
 // Constants
 constexpr size_t DEFAULT_KMER_SIZE = 19;
-constexpr size_t DEFAULT_BATCH_SIZE = 10000;
+// Default GPU batch size. Larger batches improve GPU utilization
+// at the cost of higher memory usage.
+constexpr size_t DEFAULT_BATCH_SIZE = 60000;
 constexpr size_t MAX_READ_LENGTH = 1024;
 constexpr size_t MAX_CIGAR_LENGTH = 2048;
 
