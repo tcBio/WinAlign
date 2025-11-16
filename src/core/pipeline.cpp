@@ -499,78 +499,6 @@ private:
         return 1000000; // 1M reads default estimate
     }
 
-    // Process seeding stage
-    void process_seeding(const std::vector<ReadPair>& pairs,
-                        const std::vector<Read>& reads,
-                        bool is_paired) {
-        // Transfer reads to GPU
-        // TODO: Implement full read transfer (simplified for now)
-
-        cuda::FMIndex dummy_fm_index; // TODO: Use actual FM-index from reference_loader
-        uint32_t max_seeds = config_.batch_size * (MAX_READ_LENGTH - config_.kmer_size + 1);
-
-        // Extract k-mers and find seeds
-        cudaError_t err = cuda::extract_seeds(
-            d_read_batch_,
-            dummy_fm_index,
-            d_seeds_,
-            max_seeds,
-            config_.kmer_size,
-            0 // Default stream
-        );
-
-        if (err != cudaSuccess) {
-            std::cerr << "Seeding error: " << cudaGetErrorString(err) << "\n";
-        }
-
-        // Store number of seeds found
-        num_seeds_found_ = max_seeds; // TODO: Get actual count from seeding
-    }
-
-    // Process alignment stage
-    void process_alignment(size_t batch_count) {
-        if (num_seeds_found_ == 0) return;
-
-        // Get reference sequence (simplified - use first sequence)
-        auto sequences = reference_loader_->get_sequences();
-        if (sequences.empty()) return;
-
-        const auto& ref_seq = sequences[0].sequence;
-        char* d_reference = nullptr;
-        gpu_mem_manager_->allocate(ref_seq.length(), (void**)&d_reference);
-        gpu_mem_manager_->copy_to_device(d_reference, ref_seq.c_str(), ref_seq.length());
-
-        // Set up Smith-Waterman parameters
-        cuda::SWParams sw_params;
-        sw_params.match_score = 1;
-        sw_params.mismatch_score = -4;
-        sw_params.gap_open = -6;
-        sw_params.gap_extend = -1;
-
-        // Launch Smith-Waterman alignment
-        cudaError_t err = cuda::smith_waterman_align(
-            d_read_batch_,
-            d_seeds_,
-            num_seeds_found_,
-            d_reference,
-            ref_seq.length(),
-            sw_params,
-            d_results_,
-            0 // Default stream
-        );
-
-        if (err != cudaSuccess) {
-            std::cerr << "Alignment error: " << cudaGetErrorString(err) << "\n";
-        }
-
-        // Calculate mapping quality
-        cuda::calculate_mapping_quality(d_results_, num_seeds_found_, 0);
-
-        gpu_mem_manager_->free(d_reference);
-
-        metrics_.aligned_reads += batch_count * 0.95; // ~95% alignment rate
-    }
-
     // Process filtering stage
     void process_filtering(size_t batch_count) {
         if (num_seeds_found_ == 0) return;
@@ -723,13 +651,45 @@ private:
             d_read_batch_.num_reads = static_cast<uint32_t>(num_reads);
         }
 
-        if (d_read_batch_.num_reads > 0) {
+        bool used_cpu_seeding = false;
+        uint32_t total_seeds = 0;
+        uint32_t step = std::max<uint32_t>(1, config_.kmer_size / 2);
+        Logger::instance().info("GPU seeding batch of " +
+            std::to_string(d_read_batch_.num_reads) + " reads");
+        cudaError_t seed_err = cuda::generate_gpu_seeds(
+            d_read_batch_,
+            d_fm_index_,
+            d_seeds_,
+            MAX_SEEDS_PER_READ,
+            config_.kmer_size,
+            step,
+            total_seeds,
+            compute_stream_);
+        if (seed_err != cudaSuccess || total_seeds == 0) {
+            Logger::instance().warn("GPU seeding failed: " +
+                std::string(cudaGetErrorString(seed_err)) +
+                ". Falling back to CPU seeding.");
+            if (!build_seeds_from_fm_index()) {
+                return Result<bool>(ErrorCode::RUNTIME_ERROR,
+                                    "Unable to generate seeds from FM-index");
+            }
+            used_cpu_seeding = true;
+        } else {
+            num_seeds_found_ = total_seeds;
+        }
+
+        if (used_cpu_seeding) {
+            num_seeds_found_ = static_cast<uint32_t>(host_seeds_.size());
+            if (num_seeds_found_ == 0) {
+                return Result<bool>(ErrorCode::RUNTIME_ERROR,
+                                    "CPU FM-index seeding produced no seeds");
+            }
             auto err_copy = gpu_mem_manager_->copy_to_device(
                 d_seeds_,
                 host_seeds_.data(),
                 num_seeds_found_ * sizeof(cuda::Seed));
             if (err_copy != cudaSuccess) {
-                auto message = std::string("Failed to copy seeds to device: ") +
+                auto message = std::string("Failed to copy fallback seeds to device: ") +
                                cudaGetErrorString(err_copy);
                 return Result<bool>(ErrorCode::CUDA_ERROR, message);
             }

@@ -5,270 +5,270 @@
 namespace winalign {
 namespace cuda {
 
-// Device function: Convert nucleotide to 2-bit encoding
 __device__ inline uint8_t char_to_2bit(char c) {
     switch (c) {
         case 'A': case 'a': return 0;
         case 'C': case 'c': return 1;
         case 'G': case 'g': return 2;
         case 'T': case 't': return 3;
-        default: return 0; // Treat N as A
+        default: return 0;
     }
 }
 
-// Device function: Encode k-mer to 64-bit integer (for k <= 32)
-__device__ uint64_t encode_kmer(const char* seq, uint32_t kmer_size) {
-    uint64_t encoded = 0;
-    for (uint32_t i = 0; i < kmer_size; ++i) {
-        encoded = (encoded << 2) | char_to_2bit(seq[i]);
+__device__ inline uint8_t char_to_base(char c) {
+    switch (c) {
+        case 'A': case 'a': return 0;
+        case 'C': case 'c': return 1;
+        case 'G': case 'g': return 2;
+        case 'T': case 't': return 3;
+        default: return 4;
     }
-    return encoded;
 }
 
-// Device function: Compute reverse complement of k-mer
-__device__ uint64_t reverse_complement(uint64_t kmer, uint32_t kmer_size) {
-    uint64_t rc = 0;
-    for (uint32_t i = 0; i < kmer_size; ++i) {
-        uint8_t base = (kmer >> (i * 2)) & 0x3;
-        uint8_t comp = 3 - base; // A<->T, C<->G
-        rc = (rc << 2) | comp;
+__device__ uint64_t occ_rank(
+    const FMIndex& fm_index,
+    uint8_t base,
+    int64_t pos
+) {
+    if (base >= 5 || fm_index.length == 0) return 0;
+    if (pos < 0) return 0;
+    if (pos >= static_cast<int64_t>(fm_index.length)) {
+        pos = static_cast<int64_t>(fm_index.length) - 1;
     }
-    return rc;
+
+    uint64_t checkpoint = static_cast<uint64_t>(pos) / fm_index.occ_interval;
+    uint64_t count = 0;
+    if (checkpoint > 0) {
+        count = fm_index.occ_table[(checkpoint - 1) * 5 + base];
+    }
+    uint64_t start = checkpoint * fm_index.occ_interval;
+    for (uint64_t i = start; i <= static_cast<uint64_t>(pos); ++i) {
+        if (fm_index.bwt[i] == base) {
+            count++;
+        }
+    }
+    return count;
 }
 
-// Kernel: Extract k-mers from all reads in parallel
-__global__ void extract_kmers_kernel(
-    const char* sequences,
-    const uint32_t* offsets,
-    const uint32_t* lengths,
-    uint32_t num_reads,
+__device__ bool backward_search(
+    const FMIndex& fm_index,
+    const char* seq,
+    uint32_t start,
     uint32_t kmer_size,
-    Seed* seeds,
+    uint32_t read_length,
+    uint64_t& sp,
+    uint64_t& ep
+) {
+    if (start + kmer_size > read_length || fm_index.length == 0) {
+        return false;
+    }
+
+    sp = 0;
+    ep = fm_index.length - 1;
+    for (int32_t i = static_cast<int32_t>(kmer_size) - 1; i >= 0; --i) {
+        uint8_t base = char_to_base(seq[start + i]);
+        if (base >= 4) {
+            return false;
+        }
+
+        uint64_t occ_sp = (sp == 0)
+            ? 0
+            : occ_rank(fm_index, base, static_cast<int64_t>(sp) - 1);
+        uint64_t occ_ep = occ_rank(fm_index, base, static_cast<int64_t>(ep));
+        sp = fm_index.c_table[base] + occ_sp;
+        ep = fm_index.c_table[base] + occ_ep - 1;
+        if (sp > ep) {
+            return false;
+        }
+    }
+    return sp <= ep;
+}
+
+__global__ void fm_seed_kernel(
+    const ReadBatch reads,
+    const FMIndex fm_index,
+    Seed* tmp_seeds,
+    uint32_t max_seeds_per_read,
+    uint32_t kmer_size,
+    uint32_t step,
+    uint32_t max_hits_per_seed,
     uint32_t* seed_counts
 ) {
-    uint32_t read_id = blockIdx.x;
-    if (read_id >= num_reads) return;
+    uint32_t read_id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (read_id >= reads.num_reads) return;
 
-    uint32_t offset = offsets[read_id];
-    uint32_t length = lengths[read_id];
+    const char* seq = reads.sequences + reads.offsets[read_id];
+    uint32_t length = reads.lengths[read_id];
 
     if (length < kmer_size) {
         seed_counts[read_id] = 0;
         return;
     }
 
-    const char* read_seq = sequences + offset;
-    uint32_t num_kmers = length - kmer_size + 1;
+    uint32_t stride = max(step, 1u);
+    uint32_t base_offset = read_id * max_seeds_per_read;
+    uint32_t written = 0;
 
-    // Each thread processes one k-mer
-    uint32_t kmer_idx = threadIdx.x;
-
-    if (kmer_idx < num_kmers) {
-        // Extract k-mer
-        uint64_t kmer = encode_kmer(read_seq + kmer_idx, kmer_size);
-        uint64_t rc_kmer = reverse_complement(kmer, kmer_size);
-
-        // Use canonical k-mer (lexicographically smaller)
-        uint64_t canonical = min(kmer, rc_kmer);
-
-        // Calculate global seed index
-        uint32_t seed_base = 0;
-        for (uint32_t i = 0; i < read_id; ++i) {
-            seed_base += (lengths[i] >= kmer_size) ? (lengths[i] - kmer_size + 1) : 0;
+    for (uint32_t start = 0;
+         start + kmer_size <= length && written < max_seeds_per_read;
+         start += stride) {
+        uint64_t sp = 0, ep = 0;
+        if (!backward_search(fm_index, seq, start, kmer_size, length, sp, ep)) {
+            continue;
         }
-        uint32_t seed_idx = seed_base + kmer_idx;
 
-        // Store seed
-        seeds[seed_idx].position = canonical; // Temporary: store encoded k-mer
-        seeds[seed_idx].read_id = read_id;
-        seeds[seed_idx].read_offset = kmer_idx;
-        seeds[seed_idx].length = kmer_size;
-        seeds[seed_idx].mismatches = 0;
+        uint64_t hits = (ep >= sp) ? (ep - sp + 1) : 0;
+        hits = min<uint64_t>(hits, max_hits_per_seed);
+
+        for (uint64_t h = 0; h < hits && written < max_seeds_per_read; ++h) {
+            uint64_t sa_pos = fm_index.suffix_array[sp + h];
+            Seed seed{};
+            seed.position = sa_pos;
+            seed.read_id = read_id;
+            seed.read_offset = start;
+            seed.length = kmer_size;
+            seed.mismatches = 0;
+            tmp_seeds[base_offset + written] = seed;
+            written++;
+        }
     }
 
-    // First thread stores count
-    if (threadIdx.x == 0) {
-        seed_counts[read_id] = num_kmers;
-    }
+    seed_counts[read_id] = written;
 }
 
-// Device function: Perform FM-index backward search
-__device__ bool fm_index_search(
-    const uint8_t* bwt,
-    const uint64_t* c_table,
-    const uint64_t* occ_table,
-    uint64_t bwt_length,
-    uint32_t occ_interval,
-    const char* pattern,
-    uint32_t pattern_len,
-    uint64_t& sp,
-    uint64_t& ep
-) {
-    sp = 0;
-    ep = bwt_length - 1;
-
-    // Backward search
-    for (int i = pattern_len - 1; i >= 0; --i) {
-        uint8_t c = char_to_2bit(pattern[i]);
-        if (c >= 5) return false; // Invalid character
-
-        // Compute rank(c, sp-1) and rank(c, ep)
-        // Simplified rank computation (would need full occ_table logic)
-        uint64_t rank_sp = (sp > 0) ? c_table[c] : 0;
-        uint64_t rank_ep = c_table[c];
-
-        // Update range
-        sp = c_table[c] + rank_sp;
-        ep = c_table[c] + rank_ep - 1;
-
-        if (sp > ep) return false; // No matches
-    }
-
-    return true;
-}
-
-// Kernel: Match seeds against FM-index
-__global__ void match_seeds_kernel(
-    const Seed* seeds,
-    uint32_t num_seeds,
-    const FMIndex fm_index,
-    const char* sequences,
+__global__ void compact_seeds_kernel(
+    const Seed* src,
+    Seed* dst,
     const uint32_t* offsets,
-    uint32_t kmer_size,
-    Seed* matched_seeds,
-    uint32_t* match_flags
+    const uint32_t* counts,
+    uint32_t max_seeds_per_read,
+    uint32_t num_reads
 ) {
-    uint32_t seed_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (seed_idx >= num_seeds) return;
+    uint32_t read_id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (read_id >= num_reads) return;
 
-    const Seed& seed = seeds[seed_idx];
+    uint32_t count = counts[read_id];
+    if (count == 0) return;
 
-    // Decode k-mer position to get actual sequence
-    // For now, mark all seeds as matched (simplified)
-    // In production, would perform actual FM-index search
-
-    matched_seeds[seed_idx] = seed;
-    matched_seeds[seed_idx].position = seed_idx; // Placeholder position
-    match_flags[seed_idx] = 1; // Mark as matched
-}
-
-// Kernel: Filter seeds by quality and occurrence count
-__global__ void filter_seeds_kernel(
-    Seed* seeds,
-    uint32_t num_seeds,
-    uint32_t* match_flags,
-    uint32_t max_occurrences
-) {
-    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_seeds) return;
-
-    // Filter seeds that occur too frequently (repetitive regions)
-    // For now, keep all seeds
-    // In production, would filter based on occurrence count
-
-    if (match_flags[idx] > max_occurrences) {
-        match_flags[idx] = 0; // Filter out
+    uint32_t offset = offsets[read_id];
+    uint32_t base = read_id * max_seeds_per_read;
+    for (uint32_t i = 0; i < count; ++i) {
+        dst[offset + i] = src[base + i];
     }
 }
 
-// Host function: Extract seeds from reads
-cudaError_t extract_seeds(
+cudaError_t generate_gpu_seeds(
     const ReadBatch& reads,
     const FMIndex& fm_index,
     Seed* seeds,
-    uint32_t max_seeds,
-    uint32_t kmer_size,
-    cudaStream_t stream
-) {
-    if (!seeds || reads.num_reads == 0) {
-        return cudaErrorInvalidValue;
-    }
-
-    // Allocate device memory for seed counts
-    uint32_t* d_seed_counts;
-    cudaError_t err = cudaMalloc(&d_seed_counts, reads.num_reads * sizeof(uint32_t));
-    if (err != cudaSuccess) return err;
-
-    // Launch k-mer extraction kernel
-    // One block per read, threads per k-mer
-    dim3 block_size(256);
-    dim3 grid_size(reads.num_reads);
-
-    extract_kmers_kernel<<<grid_size, block_size, 0, stream>>>(
-        reads.sequences,
-        reads.offsets,
-        reads.lengths,
-        reads.num_reads,
-        kmer_size,
-        seeds,
-        d_seed_counts
-    );
-
-    err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        cudaFree(d_seed_counts);
-        return err;
-    }
-
-    // Synchronize stream
-    if (stream == 0) {
-        err = cudaDeviceSynchronize();
-    } else {
-        err = cudaStreamSynchronize(stream);
-    }
-
-    cudaFree(d_seed_counts);
-    return err;
-}
-
-// Host function: Filter seeds
-cudaError_t filter_seeds(
-    Seed* seeds,
-    uint32_t num_seeds,
     uint32_t max_seeds_per_read,
+    uint32_t kmer_size,
+    uint32_t step,
+    uint32_t& out_total_seeds,
     cudaStream_t stream
 ) {
-    if (!seeds || num_seeds == 0) {
+    out_total_seeds = 0;
+    if (reads.num_reads == 0 || kmer_size == 0) {
         return cudaSuccess;
     }
 
-    // Allocate match flags
-    uint32_t* d_match_flags;
-    cudaError_t err = cudaMalloc(&d_match_flags, num_seeds * sizeof(uint32_t));
-    if (err != cudaSuccess) return err;
+    uint32_t num_reads = reads.num_reads;
+    uint64_t total_slots = static_cast<uint64_t>(num_reads) * max_seeds_per_read;
 
-    // Initialize flags to 1 (all matched)
-    err = cudaMemset(d_match_flags, 1, num_seeds * sizeof(uint32_t));
-    if (err != cudaSuccess) {
-        cudaFree(d_match_flags);
-        return err;
-    }
+    Seed* d_tmp_seeds = nullptr;
+    uint32_t* d_counts = nullptr;
+    uint32_t* d_offsets = nullptr;
+    void* d_temp_storage = nullptr;
+    size_t temp_bytes = 0;
 
-    // Launch filtering kernel
-    dim3 block_size(256);
-    dim3 grid_size((num_seeds + block_size.x - 1) / block_size.x);
+    cudaError_t err = cudaMalloc(&d_tmp_seeds, total_slots * sizeof(Seed));
+    if (err != cudaSuccess) goto cleanup;
+    err = cudaMalloc(&d_counts, num_reads * sizeof(uint32_t));
+    if (err != cudaSuccess) goto cleanup;
+    err = cudaMalloc(&d_offsets, num_reads * sizeof(uint32_t));
+    if (err != cudaSuccess) goto cleanup;
+    err = cudaMemsetAsync(d_counts, 0, num_reads * sizeof(uint32_t), stream);
+    if (err != cudaSuccess) goto cleanup;
 
-    filter_seeds_kernel<<<grid_size, block_size, 0, stream>>>(
-        seeds,
-        num_seeds,
-        d_match_flags,
-        1000 // Max occurrences threshold
+    const uint32_t block_size = 128;
+    dim3 block(block_size);
+    dim3 grid((num_reads + block_size - 1) / block_size);
+    const uint32_t max_hits_per_seed = 4;
+
+    fm_seed_kernel<<<grid, block, 0, stream>>>(
+        reads,
+        fm_index,
+        d_tmp_seeds,
+        max_seeds_per_read,
+        kmer_size,
+        step,
+        max_hits_per_seed,
+        d_counts
     );
-
     err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        cudaFree(d_match_flags);
-        return err;
+    if (err != cudaSuccess) goto cleanup;
+
+    err = cub::DeviceScan::ExclusiveSum(
+        nullptr,
+        &temp_bytes,
+        d_counts,
+        d_offsets,
+        num_reads,
+        stream);
+    if (err != cudaSuccess) goto cleanup;
+
+    err = cudaMalloc(&d_temp_storage, temp_bytes);
+    if (err != cudaSuccess) goto cleanup;
+
+    err = cub::DeviceScan::ExclusiveSum(
+        d_temp_storage,
+        temp_bytes,
+        d_counts,
+        d_offsets,
+        num_reads,
+        stream);
+    if (err != cudaSuccess) goto cleanup;
+
+    uint32_t last_offset = 0;
+    uint32_t last_count = 0;
+    err = cudaMemcpyAsync(
+        &last_offset,
+        d_offsets + (num_reads - 1),
+        sizeof(uint32_t),
+        cudaMemcpyDeviceToHost,
+        stream);
+    if (err != cudaSuccess) goto cleanup;
+    err = cudaMemcpyAsync(
+        &last_count,
+        d_counts + (num_reads - 1),
+        sizeof(uint32_t),
+        cudaMemcpyDeviceToHost,
+        stream);
+    if (err != cudaSuccess) goto cleanup;
+    err = cudaStreamSynchronize(stream);
+    if (err != cudaSuccess) goto cleanup;
+
+    out_total_seeds = last_offset + last_count;
+    if (out_total_seeds == 0) {
+        err = cudaSuccess;
+        goto cleanup;
     }
 
-    cudaFree(d_match_flags);
+    compact_seeds_kernel<<<grid, block, 0, stream>>>(
+        d_tmp_seeds,
+        seeds,
+        d_offsets,
+        d_counts,
+        max_seeds_per_read,
+        num_reads);
+    err = cudaGetLastError();
 
-    // Synchronize
-    if (stream == 0) {
-        return cudaDeviceSynchronize();
-    } else {
-        return cudaStreamSynchronize(stream);
-    }
+cleanup:
+    if (d_tmp_seeds) cudaFree(d_tmp_seeds);
+    if (d_counts) cudaFree(d_counts);
+    if (d_offsets) cudaFree(d_offsets);
+    if (d_temp_storage) cudaFree(d_temp_storage);
+    return err;
 }
 
 cudaError_t allocate_read_batch(

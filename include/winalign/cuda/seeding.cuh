@@ -62,42 +62,6 @@ struct HostFMIndexView {
 };
 
 /**
- * @brief Extract k-mers and find seeds
- *
- * @param reads Input read batch on device
- * @param fm_index FM-index on device
- * @param seeds Output seeds on device
- * @param max_seeds Maximum seeds per read
- * @param kmer_size K-mer size
- * @param stream CUDA stream for async execution
- * @return cudaError_t CUDA error code
- */
-cudaError_t extract_seeds(
-    const ReadBatch& reads,
-    const FMIndex& fm_index,
-    Seed* seeds,
-    uint32_t max_seeds,
-    uint32_t kmer_size,
-    cudaStream_t stream = 0
-);
-
-/**
- * @brief Filter and rank seeds by quality
- *
- * @param seeds Input/output seeds on device
- * @param num_seeds Number of seeds
- * @param max_seeds_per_read Maximum seeds to keep per read
- * @param stream CUDA stream for async execution
- * @return cudaError_t CUDA error code
- */
-cudaError_t filter_seeds(
-    Seed* seeds,
-    uint32_t num_seeds,
-    uint32_t max_seeds_per_read,
-    cudaStream_t stream = 0
-);
-
-/**
  * @brief Allocate read batch on device
  *
  * @param batch Output read batch
@@ -152,6 +116,29 @@ cudaError_t free_fm_index(FMIndex& fm_index);
 cudaError_t copy_fm_index_to_device(
     FMIndex& dst,
     const HostFMIndexView& src,
+    cudaStream_t stream = 0
+);
+
+/**
+ * @brief Generate seeds using the FM-index entirely on the GPU.
+ *
+ * @param reads Read batch residing on the GPU
+ * @param fm_index FM-index buffers on the GPU
+ * @param seeds Destination seed buffer (capacity: num_reads * max_seeds_per_read)
+ * @param max_seeds_per_read Maximum seeds emitted per read
+ * @param kmer_size Seed length
+ * @param step Step size between successive k-mers
+ * @param stream CUDA stream for asynchronous execution
+ * @param out_total_seeds Receives the number of valid seeds written
+ */
+cudaError_t generate_gpu_seeds(
+    const ReadBatch& reads,
+    const FMIndex& fm_index,
+    Seed* seeds,
+    uint32_t max_seeds_per_read,
+    uint32_t kmer_size,
+    uint32_t step,
+    uint32_t& out_total_seeds,
     cudaStream_t stream = 0
 );
 
