@@ -15,6 +15,14 @@ constexpr uint16_t SAM_FLAG_SUPPLEMENTARY = 0x800;
 constexpr uint16_t SAM_FLAG_DUPLICATE = 0x400;
 constexpr uint16_t SAM_FLAG_PROPER_PAIR = 0x2;
 
+// Predicate used when compacting results
+struct IsFiltered {
+    __host__ __device__
+    bool operator()(const AlignmentResult& r) const {
+        return r.score == 0 || (r.flag & SAM_FLAG_DUPLICATE);
+    }
+};
+
 // Device function: Check if alignment passes quality filter
 __device__ inline bool passes_quality_filter(
     const AlignmentResult& result,
@@ -523,14 +531,11 @@ uint32_t compact_results(
     // For simplicity, we'll remove alignments with score == 0
     // In production, this would use a separate filter flags array
     thrust::device_ptr<AlignmentResult> d_results(results);
-
     auto new_end = thrust::remove_if(
         thrust::cuda::par.on(stream),
         d_results,
         d_results + num_results,
-        [] __device__ (const AlignmentResult& r) {
-            return r.score == 0 || (r.flag & SAM_FLAG_DUPLICATE);
-        }
+        IsFiltered()
     );
 
     uint32_t new_count = thrust::distance(d_results, new_end);

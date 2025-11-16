@@ -39,9 +39,26 @@ struct FMIndex {
     uint64_t* c_table;      // C table (cumulative character counts)
     uint64_t* occ_table;    // Occurrence table
     uint64_t length;        // Total length
+    uint64_t* suffix_array; // Full suffix array
+    size_t occ_entries;     // Number of occurrence checkpoints * 5
+    size_t suffix_length;   // Entries in suffix array
+    uint32_t occ_interval;  // Checkpoint interval
 
     FMIndex() : bwt(nullptr), c_table(nullptr),
-                occ_table(nullptr), length(0) {}
+                occ_table(nullptr), length(0),
+                suffix_array(nullptr), occ_entries(0),
+                suffix_length(0), occ_interval(0) {}
+};
+
+struct HostFMIndexView {
+    const uint8_t* bwt = nullptr;
+    uint64_t length = 0;
+    const uint64_t* c_table = nullptr;
+    const uint64_t* occ_table = nullptr;
+    size_t occ_entries = 0;
+    const uint64_t* suffix_array = nullptr;
+    size_t suffix_length = 0;
+    uint32_t occ_interval = 0;
 };
 
 /**
@@ -111,7 +128,9 @@ cudaError_t free_read_batch(ReadBatch& batch);
  */
 cudaError_t allocate_fm_index(
     FMIndex& fm_index,
-    uint64_t length
+    uint64_t length,
+    size_t occ_entries,
+    size_t suffix_length
 );
 
 /**
@@ -132,7 +151,7 @@ cudaError_t free_fm_index(FMIndex& fm_index);
  */
 cudaError_t copy_fm_index_to_device(
     FMIndex& dst,
-    const void* src,
+    const HostFMIndexView& src,
     cudaStream_t stream = 0
 );
 

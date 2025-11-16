@@ -3,6 +3,7 @@ add_library(winalign_core OBJECT
     pipeline.cpp
     config.cpp
     memory_manager.cpp
+    logger.cpp
 )
 
 target_include_directories(winalign_core

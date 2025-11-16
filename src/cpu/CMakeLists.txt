@@ -9,9 +9,12 @@ add_library(winalign_cpu OBJECT
 target_include_directories(winalign_cpu
     PUBLIC
         ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/third_party/libdivsufsort/include
+        ${CMAKE_BINARY_DIR}/third_party/libdivsufsort/include
 )
 
 target_link_libraries(winalign_cpu
     PUBLIC
         ZLIB::ZLIB
+        divsufsort64
 )

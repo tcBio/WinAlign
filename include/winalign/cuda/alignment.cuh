@@ -12,16 +12,28 @@ namespace cuda {
  */
 struct AlignmentResult {
     uint32_t read_id;           // Read ID
-    uint64_t position;          // Alignment position
+    uint32_t read_length;       // Length of the read
+    uint64_t position;          // Alignment start position
     int32_t score;              // Alignment score
     uint16_t cigar_length;      // CIGAR string length
     uint16_t flag;              // SAM flags
     uint8_t mapping_quality;    // Mapping quality
+    uint8_t reserved;           // Padding/reserved
+    uint16_t reserved2;         // Padding/reserved
     char* cigar;                // CIGAR string (device pointer)
 
-    AlignmentResult() : read_id(0), position(0), score(0),
-                       cigar_length(0), flag(0),
-                       mapping_quality(0), cigar(nullptr) {}
+    __host__ __device__
+    AlignmentResult()
+        : read_id(0),
+          read_length(0),
+          position(0),
+          score(0),
+          cigar_length(0),
+          flag(0),
+          mapping_quality(0),
+          reserved(0),
+          reserved2(0),
+          cigar(nullptr) {}
 };
 
 /**

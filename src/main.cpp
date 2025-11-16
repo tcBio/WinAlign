@@ -1,10 +1,61 @@
 #include "winalign/pipeline.h"
 #include "winalign/common.h"
+#include "winalign/logger.h"
+#include <algorithm>
+#include <cctype>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <cstdlib>
+#include <filesystem>
 
 using namespace winalign;
+
+namespace {
+std::string trim_copy(const std::string& input) {
+    auto begin = std::find_if_not(input.begin(), input.end(),
+                                  [](unsigned char ch) { return std::isspace(ch); });
+    auto end = std::find_if_not(input.rbegin(), input.rend(),
+                                [](unsigned char ch) { return std::isspace(ch); }).base();
+    if (begin >= end) return {};
+    return std::string(begin, end);
+}
+
+bool load_config_file(const std::string& path, PipelineConfig& config, std::string& error) {
+    std::ifstream in(path);
+    if (!in.is_open()) {
+        error = "Failed to open config file: " + path;
+        return false;
+    }
+
+    std::string line;
+    while (std::getline(in, line)) {
+        line = trim_copy(line);
+        if (line.empty() || line[0] == '#') continue;
+
+        auto delim = line.find('=');
+        if (delim == std::string::npos) continue;
+
+        std::string key = trim_copy(line.substr(0, delim));
+        std::string value = trim_copy(line.substr(delim + 1));
+
+        if (key == "reference") config.reference_fasta = value;
+        else if (key == "read1") config.read1_fastq = value;
+        else if (key == "read2") config.read2_fastq = value;
+        else if (key == "output") config.output_bam = value;
+        else if (key == "metrics") config.output_metrics = value;
+        else if (key == "threads") config.cpu_threads = std::atoi(value.c_str());
+        else if (key == "gpu_id") config.gpu_device_id = std::atoi(value.c_str());
+        else if (key == "batch_size") config.batch_size = static_cast<size_t>(std::stoul(value));
+        else if (key == "kmer_size") config.kmer_size = static_cast<size_t>(std::stoul(value));
+        else if (key == "min_mapq") config.min_mapping_quality = std::atoi(value.c_str());
+        else if (key == "log_file") config.log_file = value;
+        else if (key == "use_gpu") config.use_gpu = !(value == "0" || value == "false");
+    }
+
+    return true;
+}
+} // namespace
 
 void print_usage(const char* program_name) {
     std::cout << "WinAlign-GPU v" << VERSION << "\n";
@@ -21,6 +72,9 @@ void print_usage(const char* program_name) {
     std::cout << "  --batch-size INT        Batch size for GPU processing (default: 10000)\n";
     std::cout << "  --kmer-size INT         K-mer size for seeding (default: 19)\n";
     std::cout << "  --min-mapq INT          Minimum mapping quality (default: 0)\n";
+    std::cout << "  --config FILE           Load key=value configuration file\n";
+    std::cout << "  --cpu-only              Disable GPU acceleration\n";
+    std::cout << "  --log-file FILE         Persist logs to FILE\n";
     std::cout << "  --no-duplicates         Disable duplicate marking\n";
     std::cout << "  --no-sort               Disable coordinate sorting\n";
     std::cout << "  --no-index              Disable BAM index generation\n";
@@ -42,6 +96,22 @@ int main(int argc, char* argv[]) {
     if (argc < 2) {
         print_usage(argv[0]);
         return 1;
+    }
+
+    std::string config_file;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--config" && i + 1 < argc) {
+            config_file = argv[++i];
+        }
+    }
+
+    if (!config_file.empty()) {
+        std::string error;
+        if (!load_config_file(config_file, config, error)) {
+            std::cerr << error << "\n";
+            return 1;
+        }
     }
 
     // Simple argument parsing (TODO: use a proper argument parser library)
@@ -110,6 +180,19 @@ int main(int argc, char* argv[]) {
         else if (arg == "--no-index") {
             config.create_index = false;
         }
+        else if (arg == "--cpu-only") {
+            config.use_gpu = false;
+        }
+        else if (arg == "--log-file") {
+            if (i + 1 < argc) {
+                config.log_file = argv[++i];
+            }
+        }
+        else if (arg == "--config") {
+            if (i + 1 < argc) {
+                ++i; // Already processed
+            }
+        }
     }
 
     // Validate configuration
@@ -118,6 +201,25 @@ int main(int argc, char* argv[]) {
         print_usage(argv[0]);
         return 1;
     }
+
+    if (config.log_file.empty()) {
+        std::filesystem::path out_path(config.output_bam);
+        if (out_path.empty()) {
+            config.log_file = "winalign.log";
+        } else {
+            auto log_path = out_path;
+            log_path.replace_extension(".log");
+            config.log_file = log_path.string();
+        }
+    }
+
+    auto& logger = Logger::instance();
+    logger.set_log_file(config.log_file);
+    logger.info("WinAlign-GPU starting");
+    logger.info(std::string("Mode: ") + (config.use_gpu ? "GPU" : "CPU-only"));
+    logger.info("Reference: " + config.reference_fasta);
+    logger.info("Read1: " + config.read1_fastq +
+                (config.read2_fastq.empty() ? "" : " Read2: " + config.read2_fastq));
 
     std::cout << "WinAlign-GPU v" << VERSION << "\n";
     std::cout << "Starting alignment pipeline...\n\n";
@@ -147,6 +249,7 @@ int main(int argc, char* argv[]) {
     auto init_result = pipeline.initialize();
     if (!init_result.is_ok()) {
         std::cerr << "Error: Failed to initialize pipeline: " << init_result.message << "\n";
+        logger.error("Initialization failed: " + init_result.message);
         return 1;
     }
 
@@ -155,6 +258,7 @@ int main(int argc, char* argv[]) {
     auto run_result = pipeline.run();
     if (!run_result.is_ok()) {
         std::cerr << "\nError: Pipeline failed: " << run_result.message << "\n";
+        logger.error("Pipeline execution failed: " + run_result.message);
         return 1;
     }
 
@@ -163,6 +267,7 @@ int main(int argc, char* argv[]) {
     auto final_result = pipeline.finalize();
     if (!final_result.is_ok()) {
         std::cerr << "Error: Failed to finalize: " << final_result.message << "\n";
+        logger.error("Finalization failed: " + final_result.message);
         return 1;
     }
 

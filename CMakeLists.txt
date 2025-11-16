@@ -34,6 +34,11 @@ include_directories(
     ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
 )
 
+# Third-party: libdivsufsort for fast suffix array construction
+set(BUILD_DIVSUFSORT64 ON CACHE BOOL "Build 64-bit libdivsufsort" FORCE)
+set(BUILD_EXAMPLES OFF CACHE BOOL "Disable libdivsufsort examples" FORCE)
+add_subdirectory(third_party/libdivsufsort EXCLUDE_FROM_ALL)
+
 # Add subdirectories
 add_subdirectory(src)
 

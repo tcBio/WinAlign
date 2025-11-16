@@ -2,8 +2,10 @@
 #define WINALIGN_REFERENCE_LOADER_H
 
 #include "common.h"
-#include <memory>
+#include "fm_index.h"
 #include <map>
+#include <memory>
+#include <vector>
 
 namespace winalign {
 
@@ -16,6 +18,12 @@ struct ReferenceSequence {
     uint64_t length;
 
     ReferenceSequence() : length(0) {}
+};
+
+struct ChromosomeOffset {
+    std::string name;
+    uint64_t start = 0;   // Global offset in concatenated reference
+    uint64_t length = 0;
 };
 
 /**
@@ -108,6 +116,33 @@ public:
      * @return Size in bytes
      */
     size_t get_fm_index_size() const;
+
+    /**
+     * @brief Get FM-index object for advanced queries.
+     */
+    const FMIndex* get_fm_index() const;
+
+    /**
+     * @brief Get flattened reference sequence.
+     */
+    const std::string& concatenated_sequence() const;
+
+    /**
+     * @brief Map global position to contig name and local offset.
+     */
+    bool map_global_position(uint64_t global_pos,
+                             std::string& contig,
+                             uint64_t& contig_offset) const;
+
+    /**
+     * @brief Get chromosome offsets for reporting.
+     */
+    const std::vector<ChromosomeOffset>& chromosome_offsets() const;
+
+    /**
+     * @brief Extract subsequence from global coordinates.
+     */
+    std::string get_subsequence(uint64_t global_start, uint32_t length) const;
 
 private:
     class Impl;

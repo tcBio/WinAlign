@@ -20,6 +20,7 @@ target_link_libraries(winalign
         CUDA::cudart
         CUDA::cuda_driver
         ZLIB::ZLIB
+        divsufsort64
 )
 
 target_include_directories(winalign

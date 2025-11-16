@@ -3,6 +3,7 @@
 
 #include "common.h"
 #include <memory>
+#include <map>
 
 namespace winalign {
 

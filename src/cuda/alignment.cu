@@ -79,6 +79,7 @@ __global__ void smith_waterman_kernel(
         }
 
         results[tid].read_id = read_id;
+        results[tid].read_length = read_len;
         results[tid].position = ref_start;
         results[tid].score = score;
         results[tid].cigar_length = 0;
@@ -88,34 +89,39 @@ __global__ void smith_waterman_kernel(
         return;
     }
 
-    // Simple Smith-Waterman with linear gap penalty (simplified)
+    // Smith-Waterman with affine gap penalty
     int32_t best_score = 0;
     uint32_t best_i = 0, best_j = 0;
+    const int32_t NEG_INF = -1000000000;
 
-    // Initialize DP matrix (first row and column)
     int32_t H[MAX_DP_SIZE];
+    int32_t E[MAX_DP_SIZE];
 
     for (uint32_t i = 0; i < MAX_DP_SIZE; ++i) {
         H[i] = 0;
+        E[i] = NEG_INF;
     }
 
-    // Fill DP matrix
     for (uint32_t i = 1; i <= read_len && i < MAX_DP_SIZE; ++i) {
         int32_t prev_diag = 0;
         int32_t prev_left = 0;
+        int32_t F = NEG_INF;
 
         for (uint32_t j = 1; j <= ref_win_len && j < MAX_DP_SIZE; ++j) {
             // Match/mismatch
             int32_t diag = prev_diag + match_score(read[i-1], ref_win[j-1], params);
 
-            // Gap in read
-            int32_t up = H[j] + params.gap_open;
+            // Gap in read (vertical)
+            int32_t up = max(H[j] + params.gap_open,
+                             E[j] + params.gap_extend);
+            E[j] = up;
 
-            // Gap in reference
-            int32_t left = prev_left + params.gap_open;
+            // Gap in reference (horizontal)
+            F = max(prev_left + params.gap_open,
+                    F + params.gap_extend);
 
             // Take maximum, min 0 for local alignment
-            int32_t score = max3(diag, up, left);
+            int32_t score = max(diag, max(up, F));
             score = max(score, 0);
 
             prev_diag = H[j];
@@ -131,17 +137,25 @@ __global__ void smith_waterman_kernel(
         }
     }
 
-    // Store result
+    uint64_t align_start = ref_start;
+    if (best_j > best_i) {
+        align_start = ref_start + (best_j - best_i);
+    }
+    if (align_start >= ref_length) {
+        align_start = (ref_length > 0) ? (ref_length - 1) : 0;
+    }
+
     results[tid].read_id = read_id;
-    results[tid].position = ref_start + best_j;
+    results[tid].read_length = read_len;
+    results[tid].position = align_start;
     results[tid].score = best_score;
     results[tid].cigar_length = 0; // Would generate from traceback
     results[tid].flag = 0;
     results[tid].mapping_quality = (best_score > 0) ? min(60, best_score / 2) : 0;
 }
 
-// CIGAR operations
-enum CigarOp { MATCH = 0, INSERT = 1, DELETE = 2 };
+// CIGAR operations (currently unused placeholders)
+enum class CigarOp { MATCH = 0, INSERTION = 1, DELETION = 2 };
 
 // Kernel: Generate CIGAR from traceback
 __global__ void generate_cigar_kernel(

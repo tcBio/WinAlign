@@ -26,7 +26,6 @@ target_compile_options(winalign_cuda PRIVATE
     >
 )
 
-# Enable separable compilation for CUDA
-set_target_properties(winalign_cuda PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-)
+# Build CUDA objects without separable compilation / RDC to avoid
+# unresolved __cudaRegisterLinkedBinary symbols when linking the
+# final executable with MSVC + CUDA 13.

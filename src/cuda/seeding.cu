@@ -299,9 +299,29 @@ cudaError_t free_read_batch(ReadBatch& batch) {
     return cudaSuccess;
 }
 
-cudaError_t allocate_fm_index(FMIndex& fm_index, uint64_t length) {
-    // TODO: Allocate FM-index structures
+cudaError_t allocate_fm_index(
+    FMIndex& fm_index,
+    uint64_t length,
+    size_t occ_entries,
+    size_t suffix_length
+) {
+    cudaError_t err;
+
+    err = cudaMalloc(&fm_index.bwt, length * sizeof(uint8_t));
+    if (err != cudaSuccess) return err;
+
+    err = cudaMalloc(&fm_index.c_table, 5 * sizeof(uint64_t));
+    if (err != cudaSuccess) return err;
+
+    err = cudaMalloc(&fm_index.occ_table, occ_entries * sizeof(uint64_t));
+    if (err != cudaSuccess) return err;
+
+    err = cudaMalloc(&fm_index.suffix_array, suffix_length * sizeof(uint64_t));
+    if (err != cudaSuccess) return err;
+
     fm_index.length = length;
+    fm_index.occ_entries = occ_entries;
+    fm_index.suffix_length = suffix_length;
     return cudaSuccess;
 }
 
@@ -309,17 +329,63 @@ cudaError_t free_fm_index(FMIndex& fm_index) {
     if (fm_index.bwt) cudaFree(fm_index.bwt);
     if (fm_index.c_table) cudaFree(fm_index.c_table);
     if (fm_index.occ_table) cudaFree(fm_index.occ_table);
+    if (fm_index.suffix_array) cudaFree(fm_index.suffix_array);
     fm_index = FMIndex();
     return cudaSuccess;
 }
 
 cudaError_t copy_fm_index_to_device(
     FMIndex& dst,
-    const void* src,
+    const HostFMIndexView& src,
     cudaStream_t stream
 ) {
-    // TODO: Copy FM-index data to device
-    return cudaSuccess;
+    if (!src.bwt || !src.c_table || !src.occ_table || !src.suffix_array) {
+        return cudaErrorInvalidValue;
+    }
+
+    dst.length = src.length;
+    dst.occ_entries = src.occ_entries;
+    dst.suffix_length = src.suffix_length;
+    dst.occ_interval = src.occ_interval;
+
+    cudaError_t err = cudaMemcpyAsync(
+        dst.bwt,
+        src.bwt,
+        src.length * sizeof(uint8_t),
+        cudaMemcpyHostToDevice,
+        stream);
+    if (err != cudaSuccess) return err;
+
+    err = cudaMemcpyAsync(
+        dst.c_table,
+        src.c_table,
+        5 * sizeof(uint64_t),
+        cudaMemcpyHostToDevice,
+        stream);
+    if (err != cudaSuccess) return err;
+
+    const size_t occ_bytes = src.occ_entries * sizeof(uint64_t);
+    err = cudaMemcpyAsync(
+        dst.occ_table,
+        src.occ_table,
+        occ_bytes,
+        cudaMemcpyHostToDevice,
+        stream);
+    if (err != cudaSuccess) return err;
+
+    const size_t sa_bytes = src.suffix_length * sizeof(uint64_t);
+    err = cudaMemcpyAsync(
+        dst.suffix_array,
+        src.suffix_array,
+        sa_bytes,
+        cudaMemcpyHostToDevice,
+        stream);
+    if (err != cudaSuccess) return err;
+
+    if (stream == 0) {
+        return cudaDeviceSynchronize();
+    }
+    return cudaStreamSynchronize(stream);
 }
 
 } // namespace cuda

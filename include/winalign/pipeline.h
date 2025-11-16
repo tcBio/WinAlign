@@ -3,6 +3,8 @@
 
 #include "common.h"
 #include <memory>
+#include <map>
+#include <functional>
 
 namespace winalign {
 
@@ -35,6 +37,8 @@ struct PipelineConfig {
     bool mark_duplicates = true;
     bool sort_output = true;
     bool create_index = true;
+    bool use_gpu = true;
+    std::string log_file;
 
     // Validation
     bool is_valid() const;

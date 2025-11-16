@@ -3,6 +3,12 @@
 #include <cstring>
 #include <fstream>
 #include <numeric>
+#include <iostream>
+#include <chrono>
+#include <string>
+#include <thread>
+#include <atomic>
+#include <divsufsort64.h>
 
 namespace winalign {
 
@@ -25,29 +31,26 @@ inline char index_to_char(uint8_t idx) {
     return idx < 5 ? chars[idx] : 'N';
 }
 
-// Simple suffix array construction using induced sorting (SA-IS algorithm simplified)
+// Suffix array construction using libdivsufsort64
 void build_suffix_array(const char* text, size_t length, std::vector<uint64_t>& sa) {
     sa.resize(length);
 
-    // For proof of concept, use a simpler O(n log n) approach
-    // In production, use libdivsufsort or similar optimized library
+    if (length == 0) return;
 
-    std::vector<std::pair<std::string_view, uint64_t>> suffixes;
-    suffixes.reserve(length);
+    std::vector<saidx64_t> tmp_sa(length);
+    int ret = divsufsort64(
+        reinterpret_cast<const unsigned char*>(text),
+        tmp_sa.data(),
+        static_cast<saidx64_t>(length));
 
-    for (size_t i = 0; i < length; ++i) {
-        suffixes.emplace_back(std::string_view(text + i, length - i), i);
+    if (ret != 0) {
+        throw std::runtime_error(
+            "divsufsort64 failed while building suffix array, error code " +
+            std::to_string(ret));
     }
 
-    // Sort suffixes lexicographically
-    std::sort(suffixes.begin(), suffixes.end(),
-              [](const auto& a, const auto& b) {
-                  return a.first < b.first;
-              });
-
-    // Extract suffix array
     for (size_t i = 0; i < length; ++i) {
-        sa[i] = suffixes[i].second;
+        sa[i] = static_cast<uint64_t>(tmp_sa[i]);
     }
 }
 
@@ -80,24 +83,93 @@ public:
 
         length_ = length;
 
+        std::ofstream log("fm_index.log", std::ios::app);
+        auto log_line = [&log](const std::string& msg) {
+            std::cout << msg << std::endl;
+            if (log.is_open()) {
+                log << msg << std::endl;
+                log.flush();
+            }
+        };
+
+        auto t_start = std::chrono::steady_clock::now();
+        log_line("[FMIndex] Building index for " + std::to_string(length_) +
+                 " bp reference...");
+
         // Step 1: Build suffix array
+        log_line("[FMIndex] 1/4: Building suffix array (this may take minutes for 100Mbp+)...");
+
+        std::atomic<bool> sa_done{false};
+        std::thread progress_thread([&]() {
+            using namespace std::chrono_literals;
+            while (!sa_done.load(std::memory_order_relaxed)) {
+                std::this_thread::sleep_for(10s);
+                if (sa_done.load(std::memory_order_relaxed)) break;
+                auto now = std::chrono::steady_clock::now();
+                auto elapsed =
+                    std::chrono::duration_cast<std::chrono::seconds>(now - t_start).count();
+                log_line("[FMIndex] 1/4 still running... elapsed " +
+                         std::to_string(elapsed) + " s");
+            }
+        });
+
         std::vector<uint64_t> suffix_array;
         build_suffix_array(sequence, length, suffix_array);
+        suffix_array_ = suffix_array;
+        sa_done.store(true, std::memory_order_relaxed);
+        if (progress_thread.joinable()) {
+            progress_thread.join();
+        }
+        auto t_sa = std::chrono::steady_clock::now();
+        log_line("[FMIndex] 1/4 done in " +
+                 std::to_string(
+                     std::chrono::duration_cast<std::chrono::seconds>(t_sa - t_start).count()) +
+                 " s");
 
         // Step 2: Build BWT from suffix array
+        log_line("[FMIndex] 2/4: Building BWT...");
         build_bwt(sequence, length, suffix_array, bwt_);
+        auto t_bwt = std::chrono::steady_clock::now();
+        log_line("[FMIndex] 2/4 done in " +
+                 std::to_string(
+                     std::chrono::duration_cast<std::chrono::seconds>(t_bwt - t_sa).count()) +
+                 " s (cumulative " +
+                 std::to_string(
+                     std::chrono::duration_cast<std::chrono::seconds>(t_bwt - t_start).count()) +
+                 " s)");
 
         // Step 3: Build C table (cumulative character counts)
+        log_line("[FMIndex] 3/4: Building C table...");
         build_c_table();
+        auto t_c = std::chrono::steady_clock::now();
+        log_line("[FMIndex] 3/4 done in " +
+                 std::to_string(
+                     std::chrono::duration_cast<std::chrono::seconds>(t_c - t_bwt).count()) +
+                 " s (cumulative " +
+                 std::to_string(
+                     std::chrono::duration_cast<std::chrono::seconds>(t_c - t_start).count()) +
+                 " s)");
 
         // Step 4: Build occurrence table (for fast rank queries)
+        log_line("[FMIndex] 4/4: Building occurrence table...");
         build_occ_table();
+        auto t_occ = std::chrono::steady_clock::now();
+        log_line("[FMIndex] 4/4 done in " +
+                 std::to_string(
+                     std::chrono::duration_cast<std::chrono::seconds>(t_occ - t_c).count()) +
+                 " s (total " +
+                 std::to_string(
+                     std::chrono::duration_cast<std::chrono::seconds>(t_occ - t_start).count()) +
+                 " s)");
 
         built_ = true;
         return Result<bool>(true);
     }
 
-    size_t search(const char* pattern, size_t pattern_len, std::vector<Position>& matches) {
+    size_t search(const char* pattern,
+                  size_t pattern_len,
+                  std::vector<Position>& matches,
+                  size_t max_results) const {
         if (!built_ || !pattern || pattern_len == 0) {
             return 0;
         }
@@ -121,20 +193,19 @@ public:
             }
         }
 
-        // Extract positions from suffix array range
-        // For now, just return count (positions would require storing SA)
-        size_t count = ep - sp + 1;
-
-        // TODO: Store suffix array or use sampling for position recovery
-        // For now, return approximate positions
-        for (uint64_t i = sp; i <= ep && matches.size() < 1000; ++i) {
-            matches.push_back(i); // These would be actual genome positions
+        if (suffix_array_.empty()) {
+            return 0;
         }
 
-        return count;
+        size_t produced = 0;
+        for (uint64_t i = sp; i <= ep && produced < max_results; ++i, ++produced) {
+            matches.push_back(suffix_array_[static_cast<size_t>(i)]);
+        }
+
+        return produced;
     }
 
-    size_t count(const char* pattern, size_t pattern_len) {
+    size_t count(const char* pattern, size_t pattern_len) const {
         if (!built_ || !pattern || pattern_len == 0) {
             return 0;
         }
@@ -160,7 +231,32 @@ public:
     const uint64_t* get_occ_table() const { return occ_table_.data(); }
 
     size_t get_data_size() const {
-        return bwt_.size() + sizeof(c_table_) + occ_table_.size() * sizeof(uint64_t);
+        return bwt_.size() + sizeof(c_table_) +
+               occ_table_.size() * sizeof(uint64_t) +
+               suffix_array_.size() * sizeof(uint64_t);
+    }
+
+    const uint64_t* get_suffix_array() const {
+        return suffix_array_.empty() ? nullptr : suffix_array_.data();
+    }
+
+    size_t get_suffix_array_length() const {
+        return suffix_array_.size();
+    }
+
+    uint32_t get_occ_interval() const { return occ_interval_; }
+
+    FMIndexView get_view() const {
+        FMIndexView view;
+        view.bwt = bwt_.data();
+        view.length = length_;
+        view.c_table = c_table_;
+        view.occ_table = occ_table_.data();
+        view.occ_entries = occ_table_.size();
+        view.suffix_array = suffix_array_.data();
+        view.suffix_length = suffix_array_.size();
+        view.occ_interval = occ_interval_;
+        return view;
     }
 
     size_t get_length() const { return length_; }
@@ -171,6 +267,17 @@ public:
         if (!out.is_open()) {
             return Result<bool>(ErrorCode::RUNTIME_ERROR, "Failed to open file for writing");
         }
+
+        std::ofstream log("fm_index.log", std::ios::app);
+        auto log_line = [&log](const std::string& msg) {
+            std::cout << msg << std::endl;
+            if (log.is_open()) {
+                log << msg << std::endl;
+                log.flush();
+            }
+        };
+
+        log_line("[FMIndex] Saving index to " + filename + "...");
 
         // Write header
         out.write(reinterpret_cast<const char*>(&length_), sizeof(length_));
@@ -188,7 +295,17 @@ public:
         out.write(reinterpret_cast<const char*>(occ_table_.data()),
                   occ_size * sizeof(uint64_t));
 
+        size_t suffix_size = suffix_array_.size();
+        out.write(reinterpret_cast<const char*>(&suffix_size), sizeof(suffix_size));
+        if (suffix_size > 0) {
+            out.write(reinterpret_cast<const char*>(suffix_array_.data()),
+                      suffix_size * sizeof(uint64_t));
+        }
+
         out.close();
+        log_line("[FMIndex] Index saved successfully (" +
+                 std::to_string(occ_size) + " occ checkpoints, " +
+                 std::to_string(suffix_size) + " SA entries)");
         return Result<bool>(true);
     }
 
@@ -197,6 +314,17 @@ public:
         if (!in.is_open()) {
             return Result<bool>(ErrorCode::FILE_NOT_FOUND, "Failed to open index file");
         }
+
+        std::ofstream log("fm_index.log", std::ios::app);
+        auto log_line = [&log](const std::string& msg) {
+            std::cout << msg << std::endl;
+            if (log.is_open()) {
+                log << msg << std::endl;
+                log.flush();
+            }
+        };
+
+        log_line("[FMIndex] Loading index from " + filename + "...");
 
         // Read header
         in.read(reinterpret_cast<char*>(&length_), sizeof(length_));
@@ -216,8 +344,19 @@ public:
         in.read(reinterpret_cast<char*>(occ_table_.data()),
                 occ_size * sizeof(uint64_t));
 
+        size_t suffix_size = 0;
+        in.read(reinterpret_cast<char*>(&suffix_size), sizeof(suffix_size));
+        suffix_array_.resize(suffix_size);
+        if (suffix_size > 0) {
+            in.read(reinterpret_cast<char*>(suffix_array_.data()),
+                    suffix_size * sizeof(uint64_t));
+        }
+
         in.close();
         built_ = true;
+        log_line("[FMIndex] Index loaded successfully (" +
+                 std::to_string(occ_size) + " occ checkpoints, " +
+                 std::to_string(suffix_size) + " SA entries)");
         return Result<bool>(true);
     }
 
@@ -256,6 +395,15 @@ private:
                 }
             }
         }
+
+        if (length_ % occ_interval_ != 0) {
+            size_t checkpoint = length_ / occ_interval_;
+            if (checkpoint * 5 < occ_table_.size()) {
+                for (int j = 0; j < 5; ++j) {
+                    occ_table_[checkpoint * 5 + j] = counts[j];
+                }
+            }
+        }
     }
 
     // Rank query: count occurrences of character c up to position i
@@ -283,6 +431,7 @@ private:
     std::vector<uint8_t> bwt_;        // Burrows-Wheeler Transform
     uint64_t c_table_[5];             // Cumulative character counts (A,C,G,T,N)
     std::vector<uint64_t> occ_table_; // Occurrence table for rank queries
+    std::vector<uint64_t> suffix_array_; // Full suffix array for position lookups
 };
 
 // FMIndex public interface
@@ -295,17 +444,24 @@ Result<bool> FMIndex::build(const char* sequence, size_t length) {
     return pimpl_->build(sequence, length);
 }
 
-size_t FMIndex::search(const char* pattern, size_t length, std::vector<Position>& matches) {
-    return pimpl_->search(pattern, length, matches);
+size_t FMIndex::search(const char* pattern,
+                       size_t length,
+                       std::vector<Position>& matches,
+                       size_t max_results) const {
+    return pimpl_->search(pattern, length, matches, max_results);
 }
 
-size_t FMIndex::count(const char* pattern, size_t length) {
+size_t FMIndex::count(const char* pattern, size_t length) const {
     return pimpl_->count(pattern, length);
 }
 
 const uint8_t* FMIndex::get_bwt() const { return pimpl_->get_bwt(); }
 const uint64_t* FMIndex::get_c_table() const { return pimpl_->get_c_table(); }
 const uint64_t* FMIndex::get_occ_table() const { return pimpl_->get_occ_table(); }
+const uint64_t* FMIndex::get_suffix_array() const { return pimpl_->get_suffix_array(); }
+size_t FMIndex::get_suffix_array_length() const { return pimpl_->get_suffix_array_length(); }
+uint32_t FMIndex::get_occ_interval() const { return pimpl_->get_occ_interval(); }
+FMIndexView FMIndex::get_view() const { return pimpl_->get_view(); }
 size_t FMIndex::get_data_size() const { return pimpl_->get_data_size(); }
 size_t FMIndex::get_length() const { return pimpl_->get_length(); }
 bool FMIndex::is_built() const { return pimpl_->is_built(); }

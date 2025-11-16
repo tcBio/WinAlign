@@ -6,14 +6,8 @@
   "license": "MIT",
   "dependencies": [
     {
-      "name": "zlib",
-      "version>=": "1.2.11"
-    },
-    {
-      "name": "htslib",
-      "version>=": "1.15.0",
-      "platform": "windows"
+      "name": "zlib"
     }
   ],
-  "builtin-baseline": "latest"
+  "builtin-baseline": "0804e3b55b7e435c593707071052363fa876f170"
 }

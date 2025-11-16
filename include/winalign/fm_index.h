@@ -2,10 +2,24 @@
 #define WINALIGN_FM_INDEX_H
 
 #include "common.h"
-#include <vector>
 #include <memory>
+#include <vector>
 
 namespace winalign {
+
+/**
+ * @brief Lightweight host view of the FM-index for device transfer.
+ */
+struct FMIndexView {
+    const uint8_t* bwt = nullptr;
+    size_t length = 0;
+    const uint64_t* c_table = nullptr;
+    const uint64_t* occ_table = nullptr;
+    size_t occ_entries = 0;
+    const uint64_t* suffix_array = nullptr;
+    size_t suffix_length = 0;
+    uint32_t occ_interval = 0;
+};
 
 /**
  * @brief FM-Index for fast substring search
@@ -48,7 +62,10 @@ public:
      * @param matches Output vector of match positions
      * @return Number of matches found
      */
-    size_t search(const char* pattern, size_t length, std::vector<Position>& matches);
+    size_t search(const char* pattern,
+                  size_t length,
+                  std::vector<Position>& matches,
+                  size_t max_results = 1024) const;
 
     /**
      * @brief Count occurrences of pattern (faster than search)
@@ -56,7 +73,7 @@ public:
      * @param length Pattern length
      * @return Number of occurrences
      */
-    size_t count(const char* pattern, size_t length);
+    size_t count(const char* pattern, size_t length) const;
 
     /**
      * @brief Get BWT data for GPU transfer
@@ -81,6 +98,26 @@ public:
      * @return Size in bytes
      */
     size_t get_data_size() const;
+
+    /**
+     * @brief Get suffix array pointer (for mapping matches to coordinates)
+     */
+    const uint64_t* get_suffix_array() const;
+
+    /**
+     * @brief Number of suffix array entries.
+     */
+    size_t get_suffix_array_length() const;
+
+    /**
+     * @brief Get occurrence table interval (checkpoint spacing).
+     */
+    uint32_t get_occ_interval() const;
+
+    /**
+     * @brief Convenience view of all FM-index buffers.
+     */
+    FMIndexView get_view() const;
 
     /**
      * @brief Get reference length

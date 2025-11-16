@@ -1,9 +1,10 @@
 #include "winalign/reference_loader.h"
 #include "winalign/fm_index.h"
-#include <fstream>
-#include <sstream>
+#include <algorithm>
 #include <cctype>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 
 namespace winalign {
 
@@ -20,6 +21,8 @@ public:
 
         sequences_.clear();
         concatenated_sequence_.clear();
+        chrom_offsets_.clear();
+        sequence_order_.clear();
 
         std::string line;
         std::string current_name;
@@ -76,17 +79,29 @@ public:
                               "No sequences loaded. Call load() first.");
         }
 
-        if (!concatenated_sequence_.empty()) {
-            // Already built
-            return Result<bool>(true);
-        }
+        concatenated_sequence_.clear();
+        chrom_offsets_.clear();
 
-        // Concatenate all sequences with separator 'N'
-        for (const auto& [name, seq] : sequences_) {
-            if (!concatenated_sequence_.empty()) {
-                concatenated_sequence_ += 'N'; // Separator between chromosomes
-            }
+        auto append_sequence = [&](const ReferenceSequence& seq) {
+            ChromosomeOffset offset;
+            offset.name = seq.name;
+            offset.start = concatenated_sequence_.size();
+            offset.length = seq.length;
+            chrom_offsets_.push_back(offset);
             concatenated_sequence_ += seq.sequence;
+        };
+
+        if (!sequence_order_.empty()) {
+            for (const auto& name : sequence_order_) {
+                auto it = sequences_.find(name);
+                if (it != sequences_.end()) {
+                    append_sequence(it->second);
+                }
+            }
+        } else {
+            for (const auto& [name, seq] : sequences_) {
+                append_sequence(seq);
+            }
         }
 
         std::cout << "Building FM-index for " << concatenated_sequence_.length()
@@ -167,12 +182,52 @@ public:
         return fm_index_.get();
     }
 
+    const std::string& get_concatenated_sequence() const {
+        return concatenated_sequence_;
+    }
+
+    bool map_global_position(uint64_t global_pos,
+                             std::string& contig,
+                             uint64_t& local_offset) const {
+        if (chrom_offsets_.empty() || global_pos >= concatenated_sequence_.size()) {
+            return false;
+        }
+
+        for (const auto& entry : chrom_offsets_) {
+            uint64_t start = entry.start;
+            uint64_t end = entry.start + entry.length;
+            if (global_pos >= start && global_pos < end) {
+                contig = entry.name;
+                local_offset = global_pos - start;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    const std::vector<ChromosomeOffset>& get_chrom_offsets() const {
+        return chrom_offsets_;
+    }
+
+    std::string get_subsequence(uint64_t global_start, uint32_t length) const {
+        if (global_start >= concatenated_sequence_.size()) {
+            return {};
+        }
+        uint64_t available = concatenated_sequence_.size() - global_start;
+        uint32_t span = static_cast<uint32_t>(std::min<uint64_t>(available, length));
+        return concatenated_sequence_.substr(global_start, span);
+    }
+
 private:
     void save_sequence(const std::string& name, const std::string& sequence) {
         ReferenceSequence ref_seq;
         ref_seq.name = name;
         ref_seq.sequence = sequence;
         ref_seq.length = sequence.length();
+
+        if (!sequences_.count(name)) {
+            sequence_order_.push_back(name);
+        }
 
         sequences_[name] = std::move(ref_seq);
     }
@@ -182,6 +237,8 @@ private:
     std::string concatenated_sequence_; // All sequences concatenated
     std::unique_ptr<FMIndex> fm_index_;
     bool indexed_ = false;
+    std::vector<ChromosomeOffset> chrom_offsets_;
+    std::vector<std::string> sequence_order_;
 };
 
 ReferenceLoader::ReferenceLoader(const std::string& fasta_path)
@@ -211,6 +268,23 @@ const void* ReferenceLoader::get_fm_index_data() const {
 }
 size_t ReferenceLoader::get_fm_index_size() const {
     return pimpl_->get_fm_index_size();
+}
+const FMIndex* ReferenceLoader::get_fm_index() const {
+    return pimpl_->get_fm_index();
+}
+const std::string& ReferenceLoader::concatenated_sequence() const {
+    return pimpl_->get_concatenated_sequence();
+}
+bool ReferenceLoader::map_global_position(uint64_t global_pos,
+                                          std::string& contig,
+                                          uint64_t& local_offset) const {
+    return pimpl_->map_global_position(global_pos, contig, local_offset);
+}
+const std::vector<ChromosomeOffset>& ReferenceLoader::chromosome_offsets() const {
+    return pimpl_->get_chrom_offsets();
+}
+std::string ReferenceLoader::get_subsequence(uint64_t global_start, uint32_t length) const {
+    return pimpl_->get_subsequence(global_start, length);
 }
 
 } // namespace winalign
