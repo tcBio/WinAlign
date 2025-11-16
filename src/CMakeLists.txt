@@ -3,6 +3,9 @@ add_subdirectory(core)
 add_subdirectory(cpu)
 add_subdirectory(cuda)
 
+# Multi-process utilities (Phase 5)
+add_subdirectory(utils)
+
 # Amplicon tool (optional)
 if(BUILD_AMPLICON)
     add_subdirectory(amplicon)
