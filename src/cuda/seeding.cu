@@ -118,7 +118,9 @@ __global__ void fm_seed_kernel(
         }
 
         uint64_t hits = (ep >= sp) ? (ep - sp + 1) : 0;
-        hits = min<uint64_t>(hits, max_hits_per_seed);
+        if (hits > max_hits_per_seed) {
+            hits = max_hits_per_seed;
+        }
 
         for (uint64_t h = 0; h < hits && written < max_seeds_per_read; ++h) {
             uint64_t sa_pos = fm_index.suffix_array[sp + h];
@@ -180,6 +182,13 @@ cudaError_t generate_gpu_seeds(
     uint32_t* d_offsets = nullptr;
     void* d_temp_storage = nullptr;
     size_t temp_bytes = 0;
+    uint32_t last_offset = 0;
+    uint32_t last_count = 0;
+
+    const uint32_t block_size = 128;
+    dim3 block(block_size);
+    dim3 grid((num_reads + block_size - 1) / block_size);
+    const uint32_t max_hits_per_seed = 4;
 
     cudaError_t err = cudaMalloc(&d_tmp_seeds, total_slots * sizeof(Seed));
     if (err != cudaSuccess) goto cleanup;
@@ -189,11 +198,6 @@ cudaError_t generate_gpu_seeds(
     if (err != cudaSuccess) goto cleanup;
     err = cudaMemsetAsync(d_counts, 0, num_reads * sizeof(uint32_t), stream);
     if (err != cudaSuccess) goto cleanup;
-
-    const uint32_t block_size = 128;
-    dim3 block(block_size);
-    dim3 grid((num_reads + block_size - 1) / block_size);
-    const uint32_t max_hits_per_seed = 4;
 
     fm_seed_kernel<<<grid, block, 0, stream>>>(
         reads,
@@ -210,7 +214,7 @@ cudaError_t generate_gpu_seeds(
 
     err = cub::DeviceScan::ExclusiveSum(
         nullptr,
-        &temp_bytes,
+        temp_bytes,
         d_counts,
         d_offsets,
         num_reads,
@@ -229,8 +233,6 @@ cudaError_t generate_gpu_seeds(
         stream);
     if (err != cudaSuccess) goto cleanup;
 
-    uint32_t last_offset = 0;
-    uint32_t last_count = 0;
     err = cudaMemcpyAsync(
         &last_offset,
         d_offsets + (num_reads - 1),
