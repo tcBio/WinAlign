@@ -8,6 +8,7 @@
 
 #include "pipeline_multistream.h"
 #include "pipeline_metrics.h"
+#include "pipeline_batch_helpers.h"
 #include "winalign/logger.h"
 #include "winalign/pipeline.h"
 #include "winalign/bam_writer.h"
@@ -26,10 +27,12 @@ MultiStreamScheduler::MultiStreamScheduler(
     const PipelineConfig& config,
     std::vector<GpuBatchContext>& contexts,
     MetricsCollector& metrics,
+    BatchProcessingHelpers& batch_helpers,
     std::atomic<bool>& cancelled)
     : config_(config)
     , gpu_contexts_(contexts)
     , metrics_(metrics)
+    , batch_helpers_(batch_helpers)
     , cancelled_(cancelled)
     , d_fm_index_(nullptr)
     , d_reference_(nullptr)
@@ -472,14 +475,58 @@ void MultiStreamScheduler::process_context_results(GpuBatchContext& ctx) {
     using namespace std::chrono;
     auto write_start = high_resolution_clock::now();
 
+    // Copy GPU results to host
     ctx.host_results.resize(ctx.num_seeds);
     if (ctx.num_seeds > 0 && ctx.pinned_results) {
         std::memcpy(ctx.host_results.data(), ctx.pinned_results,
                    ctx.num_seeds * sizeof(cuda::AlignmentResult));
     }
 
-    // TODO: Implement alignment building (requires BatchProcessingHelpers)
-    Logger::instance().warn("Alignment building not yet implemented");
+    // Build alignments and write to BAM
+    for (size_t i = 0; i < ctx.read_count; ++i) {
+        const auto& view = ctx.read_views[i];
+
+        // Find best alignment for this read
+        cuda::AlignmentResult best_result;
+        bool found = false;
+
+        for (size_t j = 0; j < ctx.num_seeds; ++j) {
+            if (ctx.host_results[j].read_id == i) {
+                if (!found || ctx.host_results[j].score > best_result.score) {
+                    best_result = ctx.host_results[j];
+                    found = true;
+                }
+            }
+        }
+
+        Alignment aln;
+        if (found && best_result.score > 0) {
+            // Build alignment from GPU result
+            aln = batch_helpers_.build_alignment_from_gpu_result(best_result, view);
+            batch_helpers_.update_metrics(true, aln.mapq);
+        } else {
+            // Build unmapped alignment
+            // Get the actual read (handle paired vs single-end)
+            const Read* read_ptr = nullptr;
+            bool is_second = false;
+
+            if (ctx.is_paired) {
+                size_t pair_idx = i / 2;
+                is_second = (i % 2 == 1);
+                read_ptr = is_second ? &ctx.host_pairs[pair_idx].read2 : &ctx.host_pairs[pair_idx].read1;
+            } else {
+                read_ptr = &ctx.host_singles[i];
+            }
+
+            aln = batch_helpers_.build_unmapped_alignment(*read_ptr, ctx.is_paired, is_second);
+            batch_helpers_.update_metrics(false, 0);
+        }
+
+        // Write to BAM
+        if (bam_writer_) {
+            bam_writer_->write_alignment(aln);
+        }
+    }
 
     ctx.timing.t_write = duration_cast<microseconds>(
         high_resolution_clock::now() - write_start).count() / 1000.0;

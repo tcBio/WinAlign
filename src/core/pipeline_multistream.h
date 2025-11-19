@@ -26,8 +26,9 @@ struct FMIndexView;
 
 namespace internal {
 
-// Forward declaration
+// Forward declarations
 class MetricsCollector;
+class BatchProcessingHelpers;
 
 /**
  * @brief Multi-stream GPU scheduler with async pipeline stages
@@ -42,12 +43,14 @@ public:
      * @param config Pipeline configuration
      * @param contexts GPU batch contexts (managed externally)
      * @param metrics Metrics collector (managed externally)
+     * @param batch_helpers Batch processing helpers (managed externally)
      * @param cancelled Cancellation flag
      */
     MultiStreamScheduler(
         const PipelineConfig& config,
         std::vector<GpuBatchContext>& contexts,
         MetricsCollector& metrics,
+        BatchProcessingHelpers& batch_helpers,
         std::atomic<bool>& cancelled);
 
     /**
@@ -132,6 +135,7 @@ private:
     const PipelineConfig& config_;
     std::vector<GpuBatchContext>& gpu_contexts_;
     MetricsCollector& metrics_;
+    BatchProcessingHelpers& batch_helpers_;
     std::atomic<bool>& cancelled_;
 
     // GPU resources (not owned)

@@ -88,6 +88,7 @@ public:
             config_,
             initializer_->get_gpu_context_manager()->get_contexts(),
             *metrics_,
+            *batch_helpers_,
             cancelled_
         );
 
