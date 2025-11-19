@@ -222,7 +222,7 @@ private:
     // State
     std::atomic<bool> running_;
     std::atomic<bool> cancelled_;
-    ProgressCallback progress_callback_;
+    std::function<void(double)> progress_callback_;
     std::chrono::steady_clock::time_point start_time_;
 
     // Progress tracking
