@@ -5,6 +5,7 @@ add_library(winalign_core OBJECT
     pipeline_metrics.cpp
     pipeline_multistream.cpp
     pipeline_batch_helpers.cpp
+    pipeline_initialization.cpp
     config.cpp
     memory_manager.cpp
     logger.cpp
