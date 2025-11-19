@@ -13,6 +13,7 @@
 #include <vector>
 #include <atomic>
 #include <functional>
+#include <mutex>
 
 namespace winalign {
 
@@ -147,6 +148,9 @@ private:
     // Progress tracking
     uint64_t estimated_total_reads_;
     std::function<void(double, const std::string&)> update_progress_fn_;
+
+    // Thread safety for BAM writing
+    std::mutex bam_write_mutex_;
 };
 
 } // namespace internal

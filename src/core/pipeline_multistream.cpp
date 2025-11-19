@@ -475,6 +475,11 @@ void MultiStreamScheduler::process_context_results(GpuBatchContext& ctx) {
     using namespace std::chrono;
     auto write_start = high_resolution_clock::now();
 
+    // Ensure D2H transfer is fully complete before accessing pinned memory
+    if (ctx.stream) {
+        cudaStreamSynchronize(ctx.stream);
+    }
+
     // Copy GPU results to host
     ctx.host_results.resize(ctx.num_seeds);
     if (ctx.num_seeds > 0 && ctx.pinned_results) {
@@ -500,31 +505,39 @@ void MultiStreamScheduler::process_context_results(GpuBatchContext& ctx) {
         }
 
         Alignment aln;
+        const Read* current_read_ptr = nullptr;
+
         if (found && best_result.score > 0) {
             // Build alignment from GPU result
             aln = batch_helpers_.build_alignment_from_gpu_result(best_result, view);
             batch_helpers_.update_metrics(true, aln.mapq);
+            current_read_ptr = view.read;
         } else {
             // Build unmapped alignment
             // Get the actual read (handle paired vs single-end)
-            const Read* read_ptr = nullptr;
             bool is_second = false;
 
             if (ctx.is_paired) {
                 size_t pair_idx = i / 2;
                 is_second = (i % 2 == 1);
-                read_ptr = is_second ? &ctx.host_pairs[pair_idx].read2 : &ctx.host_pairs[pair_idx].read1;
+                current_read_ptr = is_second ? &ctx.host_pairs[pair_idx].read2
+                                             : &ctx.host_pairs[pair_idx].read1;
             } else {
-                read_ptr = &ctx.host_singles[i];
+                current_read_ptr = &ctx.host_singles[i];
             }
 
-            aln = batch_helpers_.build_unmapped_alignment(*read_ptr, ctx.is_paired, is_second);
+            aln = batch_helpers_.build_unmapped_alignment(*current_read_ptr, ctx.is_paired, is_second);
             batch_helpers_.update_metrics(false, 0);
         }
 
-        // Write to BAM
-        if (bam_writer_) {
-            bam_writer_->write_alignment(aln);
+        // Write to BAM with proper error handling
+        if (bam_writer_ && current_read_ptr) {
+            Result<bool> write_result = bam_writer_->write(aln, *current_read_ptr);
+            if (!write_result.is_ok()) {
+                Logger::instance().error("Failed to write alignment for read " +
+                                        current_read_ptr->name + ": " +
+                                        write_result.error_message());
+            }
         }
     }
 
