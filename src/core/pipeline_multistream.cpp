@@ -14,6 +14,7 @@
 #include "winalign/fastq_parser.h"
 #include "winalign/fastq_worker.h"
 #include "winalign/cuda/memory_manager.cuh"
+#include <algorithm>
 #include <chrono>
 #include <thread>
 #include <cstring>
@@ -106,12 +107,7 @@ Result<bool> MultiStreamScheduler::run() {
 
                         if (ctx.eof) {
                             parser_eof = true;
-                            Logger::instance().info("Reached EOF on FASTQ input");
                         } else if (ctx.read_count > 0) {
-                            Logger::instance().info("Loaded batch into context " +
-                                std::to_string(ctx.context_id) + ": " +
-                                std::to_string(ctx.read_count) + " reads");
-
                             // Prepare for GPU
                             if (!prepare_context_for_gpu(ctx)) {
                                 Logger::instance().warn("Failed to prepare context " +
@@ -150,29 +146,14 @@ Result<bool> MultiStreamScheduler::run() {
         // === SEEDING STAGE: Launch seeding for contexts that finished H2D ===
         for (auto& ctx : gpu_contexts_) {
             if (ctx.state == ContextState::TRANSFERRING) {
-                cudaError_t err = cudaEventQuery(ctx.event_h2d_done);
-                if (err == cudaSuccess) {
-                    // H2D complete, collect timing
-                    float h2d_time = 0.0f;
-                    cudaEventElapsedTime(&h2d_time, ctx.event_h2d_done, ctx.event_h2d_done);
-                    ctx.timing.t_h2d = h2d_time;
-
-                    // Launch seeding
-                    err = launch_seeding(ctx);
+                if (check_event(ctx.event_h2d_done, ctx, all_contexts_done)) {
+                    record_timing(ctx.event_h2d_done, ctx.event_h2d_done, ctx.timing.t_h2d);
+                    cudaError_t err = launch_seeding(ctx);
+                    ctx.state = (err == cudaSuccess) ? ContextState::SEEDING : ContextState::ALIGNING;
                     if (err != cudaSuccess) {
-                        Logger::instance().warn("GPU seeding failed for context " +
-                            std::to_string(ctx.context_id) + ": " + cudaGetErrorString(err));
-                        ctx.state = ContextState::ALIGNING;  // Skip to alignment
-                    } else {
-                        ctx.state = ContextState::SEEDING;
+                        Logger::instance().warn("Seeding failed: " + std::string(cudaGetErrorString(err)));
                     }
                     all_contexts_done = false;
-                } else if (err != cudaErrorNotReady) {
-                    Logger::instance().error("Event query error for context " +
-                        std::to_string(ctx.context_id));
-                    ctx.state = ContextState::EMPTY;
-                } else {
-                    all_contexts_done = false;  // Still waiting
                 }
             }
         }
@@ -180,33 +161,14 @@ Result<bool> MultiStreamScheduler::run() {
         // === ALIGNMENT STAGE: Launch SW for contexts that finished seeding ===
         for (auto& ctx : gpu_contexts_) {
             if (ctx.state == ContextState::SEEDING) {
-                cudaError_t err = cudaEventQuery(ctx.event_seeding_done);
-                if (err == cudaSuccess) {
-                    // Seeding complete, collect timing
-                    float seed_time = 0.0f;
-                    cudaEventElapsedTime(&seed_time,
-                        ctx.event_h2d_done, ctx.event_seeding_done);
-                    ctx.timing.t_gpu_seed = seed_time;
-
-                    Logger::instance().info("Context " + std::to_string(ctx.context_id) +
-                        " seeding complete: " + std::to_string(ctx.num_seeds) + " seeds");
-
-                    // Launch alignment
-                    err = launch_alignment(ctx);
+                if (check_event(ctx.event_seeding_done, ctx, all_contexts_done)) {
+                    record_timing(ctx.event_h2d_done, ctx.event_seeding_done, ctx.timing.t_gpu_seed);
+                    cudaError_t err = launch_alignment(ctx);
+                    ctx.state = (err == cudaSuccess) ? ContextState::ALIGNING : ContextState::COPYING_BACK;
                     if (err != cudaSuccess) {
-                        Logger::instance().warn("GPU alignment failed for context " +
-                            std::to_string(ctx.context_id));
-                        ctx.state = ContextState::COPYING_BACK;  // Skip to D2H
-                    } else {
-                        ctx.state = ContextState::ALIGNING;
+                        Logger::instance().warn("Alignment failed");
                     }
                     all_contexts_done = false;
-                } else if (err != cudaErrorNotReady) {
-                    Logger::instance().error("Event query error for context " +
-                        std::to_string(ctx.context_id));
-                    ctx.state = ContextState::EMPTY;
-                } else {
-                    all_contexts_done = false;  // Still waiting
                 }
             }
         }
@@ -214,33 +176,14 @@ Result<bool> MultiStreamScheduler::run() {
         // === D2H TRANSFER STAGE: Launch async D2H for contexts that finished alignment ===
         for (auto& ctx : gpu_contexts_) {
             if (ctx.state == ContextState::ALIGNING) {
-                cudaError_t err = cudaEventQuery(ctx.event_sw_done);
-                if (err == cudaSuccess) {
-                    // Alignment complete, collect timing
-                    float align_time = 0.0f;
-                    cudaEventElapsedTime(&align_time,
-                        ctx.event_seeding_done, ctx.event_sw_done);
-                    ctx.timing.t_gpu_align = align_time;
-
-                    Logger::instance().info("Context " + std::to_string(ctx.context_id) +
-                        " alignment complete");
-
-                    // Launch D2H transfer
-                    err = launch_d2h_transfer(ctx);
+                if (check_event(ctx.event_sw_done, ctx, all_contexts_done)) {
+                    record_timing(ctx.event_seeding_done, ctx.event_sw_done, ctx.timing.t_gpu_align);
+                    cudaError_t err = launch_d2h_transfer(ctx);
+                    ctx.state = (err == cudaSuccess) ? ContextState::COPYING_BACK : ContextState::EMPTY;
                     if (err != cudaSuccess) {
-                        Logger::instance().warn("D2H transfer failed for context " +
-                            std::to_string(ctx.context_id));
-                        ctx.state = ContextState::EMPTY;
-                    } else {
-                        ctx.state = ContextState::COPYING_BACK;
+                        Logger::instance().warn("D2H transfer failed");
                     }
                     all_contexts_done = false;
-                } else if (err != cudaErrorNotReady) {
-                    Logger::instance().error("Event query error for context " +
-                        std::to_string(ctx.context_id));
-                    ctx.state = ContextState::EMPTY;
-                } else {
-                    all_contexts_done = false;  // Still waiting
                 }
             }
         }
@@ -248,30 +191,15 @@ Result<bool> MultiStreamScheduler::run() {
         // === HOST PROCESSING STAGE: Process contexts that finished D2H ===
         for (auto& ctx : gpu_contexts_) {
             if (ctx.state == ContextState::COPYING_BACK) {
-                cudaError_t err = cudaEventQuery(ctx.event_d2h_done);
-                if (err == cudaSuccess) {
-                    // D2H complete, collect timing
-                    float d2h_time = 0.0f;
-                    cudaEventElapsedTime(&d2h_time,
-                        ctx.event_sw_done, ctx.event_d2h_done);
-                    ctx.timing.t_d2h = d2h_time;
-
+                if (check_event(ctx.event_d2h_done, ctx, all_contexts_done)) {
+                    record_timing(ctx.event_sw_done, ctx.event_d2h_done, ctx.timing.t_d2h);
                     ctx.state = ContextState::DONE;
                     all_contexts_done = false;
-                } else if (err != cudaErrorNotReady) {
-                    Logger::instance().error("Event query error for context " +
-                        std::to_string(ctx.context_id));
-                    ctx.state = ContextState::EMPTY;
-                } else {
-                    all_contexts_done = false;  // Still waiting
                 }
             }
 
             if (ctx.state == ContextState::DONE) {
                 // Process results (aggregate, write BAM)
-                Logger::instance().info("Processing results for context " +
-                    std::to_string(ctx.context_id));
-
                 process_context_results(ctx);
 
                 processed_reads += ctx.read_count;
@@ -292,19 +220,8 @@ Result<bool> MultiStreamScheduler::run() {
             }
         }
 
-        // Check if we're truly done
-        if (parser_eof) {
-            bool any_active = false;
-            for (const auto& ctx : gpu_contexts_) {
-                if (ctx.state != ContextState::EMPTY) {
-                    any_active = true;
-                    break;
-                }
-            }
-            all_contexts_done = !any_active;
-        } else {
-            all_contexts_done = false;
-        }
+        all_contexts_done = parser_eof && std::all_of(gpu_contexts_.begin(), gpu_contexts_.end(),
+            [](const auto& c) { return c.state == ContextState::EMPTY; });
 
         // Small sleep to avoid busy-waiting
         std::this_thread::sleep_for(std::chrono::microseconds(100));
@@ -531,65 +448,49 @@ cudaError_t MultiStreamScheduler::launch_d2h_transfer(GpuBatchContext& ctx) {
     return err;
 }
 
+// Helper: Check event and handle errors, returns true if event complete
+bool MultiStreamScheduler::check_event(cudaEvent_t event, GpuBatchContext& ctx, bool& all_done) {
+    cudaError_t err = cudaEventQuery(event);
+    if (err == cudaSuccess) return true;
+    if (err != cudaErrorNotReady) {
+        Logger::instance().error("Event error context " + std::to_string(ctx.context_id));
+        ctx.state = ContextState::EMPTY;
+    } else {
+        all_done = false;
+    }
+    return false;
+}
+
+// Helper: Record timing between two events
+void MultiStreamScheduler::record_timing(cudaEvent_t start, cudaEvent_t end, double& timing) {
+    float ms = 0.0f;
+    cudaEventElapsedTime(&ms, start, end);
+    timing = ms;
+}
+
 void MultiStreamScheduler::process_context_results(GpuBatchContext& ctx) {
     using namespace std::chrono;
+    auto write_start = high_resolution_clock::now();
 
-    // Copy results from pinned to host buffers
     ctx.host_results.resize(ctx.num_seeds);
     if (ctx.num_seeds > 0 && ctx.pinned_results) {
-        std::memcpy(ctx.host_results.data(),
-                   ctx.pinned_results,
+        std::memcpy(ctx.host_results.data(), ctx.pinned_results,
                    ctx.num_seeds * sizeof(cuda::AlignmentResult));
     }
 
-    // Find best alignment per read
-    struct BestResult {
-        bool has_value = false;
-        cuda::AlignmentResult result;
-    };
+    // TODO: Implement alignment building (requires BatchProcessingHelpers)
+    Logger::instance().warn("Alignment building not yet implemented");
 
-    std::vector<BestResult> best_results(ctx.read_views.size());
-    for (const auto& device_result : ctx.host_results) {
-        if (device_result.read_id >= best_results.size()) {
-            continue;
-        }
-        auto& slot = best_results[device_result.read_id];
-        if (!slot.has_value || device_result.score > slot.result.score) {
-            slot.has_value = true;
-            slot.result = device_result;
-        }
-    }
+    ctx.timing.t_write = duration_cast<microseconds>(
+        high_resolution_clock::now() - write_start).count() / 1000.0;
 
-    // Build alignments and write to BAM
-    std::vector<Alignment> alignments;
-    std::vector<Read> output_reads;
-    alignments.reserve(ctx.read_views.size());
-    output_reads.reserve(ctx.read_views.size());
-
-    auto write_start = high_resolution_clock::now();
-
-    // TODO: Implement alignment building (requires pipeline helper methods)
-    // For now, this is a placeholder
-    Logger::instance().warn("Alignment building not yet implemented in MultiStreamScheduler");
-
-    if (!alignments.empty() && bam_writer_) {
-        bam_writer_->write_batch(alignments, output_reads);
-    }
-
-    auto write_end = high_resolution_clock::now();
-    ctx.timing.t_write = duration_cast<microseconds>(write_end - write_start).count() / 1000.0;
-
-    // Update performance counters
     PerformanceCounters counters;
     counters.total_gpu_seeds = ctx.num_seeds;
     counters.batches_processed = 1;
     metrics_.update_counters(counters);
 
-    // Calculate total batch time
-    auto batch_end = high_resolution_clock::now();
-    ctx.timing.t_total = duration_cast<microseconds>(batch_end - ctx.batch_start).count() / 1000.0;
-
-    // Record batch timing
+    ctx.timing.t_total = duration_cast<microseconds>(
+        high_resolution_clock::now() - ctx.batch_start).count() / 1000.0;
     metrics_.record_batch(ctx.timing, metrics_.get_batch_count() + 1);
 }
 

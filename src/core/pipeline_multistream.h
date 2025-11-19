@@ -118,6 +118,16 @@ private:
      */
     void process_context_results(GpuBatchContext& ctx);
 
+    /**
+     * @brief Check event completion and handle errors
+     */
+    bool check_event(cudaEvent_t event, GpuBatchContext& ctx, bool& all_done);
+
+    /**
+     * @brief Record timing between two CUDA events
+     */
+    void record_timing(cudaEvent_t start, cudaEvent_t end, double& timing);
+
     // Configuration and state
     const PipelineConfig& config_;
     std::vector<GpuBatchContext>& gpu_contexts_;
