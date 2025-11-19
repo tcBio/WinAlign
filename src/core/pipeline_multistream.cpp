@@ -530,8 +530,9 @@ void MultiStreamScheduler::process_context_results(GpuBatchContext& ctx) {
             batch_helpers_.update_metrics(false, 0);
         }
 
-        // Write to BAM with proper error handling
+        // Write to BAM with thread safety and error handling
         if (bam_writer_ && current_read_ptr) {
+            std::lock_guard<std::mutex> lock(bam_write_mutex_);
             Result<bool> write_result = bam_writer_->write(aln, *current_read_ptr);
             if (!write_result.is_ok()) {
                 Logger::instance().error("Failed to write alignment for read " +
