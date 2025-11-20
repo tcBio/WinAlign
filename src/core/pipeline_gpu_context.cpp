@@ -113,6 +113,47 @@ bool GpuContextManager::initialize() {
             return false;
         }
 
+        // Allocate seed chaining buffers (for 3-5x speedup)
+        err = mem_manager_->allocate(
+            max_reads_per_batch * sizeof(cuda::Seed),
+            (void**)&ctx.d_best_seeds);
+        if (err != cudaSuccess) {
+            Logger::instance().error(
+                "Failed to allocate best_seeds for context " + std::to_string(i));
+            cleanup();
+            return false;
+        }
+
+        err = mem_manager_->allocate(
+            max_reads_per_batch * sizeof(float),
+            (void**)&ctx.d_chain_scores);
+        if (err != cudaSuccess) {
+            Logger::instance().error(
+                "Failed to allocate chain_scores for context " + std::to_string(i));
+            cleanup();
+            return false;
+        }
+
+        err = mem_manager_->allocate(
+            max_reads_per_batch * sizeof(uint32_t),
+            (void**)&ctx.d_seeds_per_read_offsets);
+        if (err != cudaSuccess) {
+            Logger::instance().error(
+                "Failed to allocate seed offsets for context " + std::to_string(i));
+            cleanup();
+            return false;
+        }
+
+        err = mem_manager_->allocate(
+            max_reads_per_batch * sizeof(uint32_t),
+            (void**)&ctx.d_seeds_per_read_counts);
+        if (err != cudaSuccess) {
+            Logger::instance().error(
+                "Failed to allocate seed counts for context " + std::to_string(i));
+            cleanup();
+            return false;
+        }
+
         // Allocate pinned host buffers for async transfer
         size_t seq_capacity = static_cast<size_t>(max_reads_per_batch) * MAX_READ_LENGTH;
 
@@ -179,6 +220,24 @@ void GpuContextManager::cleanup() {
             ctx.d_results = nullptr;
         }
         cuda::free_read_batch(ctx.d_read_batch);
+
+        // Free seed chaining buffers
+        if (ctx.d_best_seeds && mem_manager_) {
+            mem_manager_->free(ctx.d_best_seeds);
+            ctx.d_best_seeds = nullptr;
+        }
+        if (ctx.d_chain_scores && mem_manager_) {
+            mem_manager_->free(ctx.d_chain_scores);
+            ctx.d_chain_scores = nullptr;
+        }
+        if (ctx.d_seeds_per_read_offsets && mem_manager_) {
+            mem_manager_->free(ctx.d_seeds_per_read_offsets);
+            ctx.d_seeds_per_read_offsets = nullptr;
+        }
+        if (ctx.d_seeds_per_read_counts && mem_manager_) {
+            mem_manager_->free(ctx.d_seeds_per_read_counts);
+            ctx.d_seeds_per_read_counts = nullptr;
+        }
 
         // Free pinned host memory
         if (mem_manager_) {

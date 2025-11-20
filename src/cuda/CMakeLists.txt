@@ -2,6 +2,7 @@
 add_library(winalign_cuda OBJECT
     memory_manager.cu
     seeding.cu
+    seeding_chain.cu
     alignment.cu
     filtering.cu
 )

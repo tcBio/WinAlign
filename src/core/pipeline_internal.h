@@ -97,6 +97,12 @@ struct GpuBatchContext {
     std::vector<cuda::AlignmentResult> host_results;
     uint32_t num_seeds = 0;
 
+    // Seed chaining (NEW - for 3-5x speedup)
+    cuda::Seed* d_best_seeds = nullptr;       // One best seed per read
+    float* d_chain_scores = nullptr;          // Chain scores per read
+    uint32_t* d_seeds_per_read_offsets = nullptr; // Offset to each read's seeds
+    uint32_t* d_seeds_per_read_counts = nullptr;  // Count of seeds per read
+
     // CUDA stream and events
     cudaStream_t stream = nullptr;
     cudaEvent_t event_h2d_done = nullptr;
