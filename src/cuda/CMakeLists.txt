@@ -19,6 +19,8 @@ target_link_libraries(winalign_cuda
 )
 
 # CUDA compilation flags
+# Note: Architecture is set via CMAKE_CUDA_ARCHITECTURES=89 in root CMakeLists.txt
+# This is optimized for NVIDIA L40S (Ada Lovelace, compute capability 8.9)
 target_compile_options(winalign_cuda PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:
         --use_fast_math
