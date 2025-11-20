@@ -1,3 +1,14 @@
+/**
+ * @file pipeline_new_structure.cpp
+ * @brief Simplified Pipeline implementation using extracted modules
+ *
+ * This file demonstrates the new structure for pipeline.cpp after integration.
+ * The original 2,288-line implementation is reduced to ~350 lines by delegating
+ * to extracted modules.
+ *
+ * BLUEPRINT FOR INTEGRATION - NOT YET ACTIVE
+ */
+
 #include "winalign/pipeline.h"
 #include "pipeline_internal.h"
 #include "pipeline_gpu_context.h"
@@ -10,11 +21,8 @@
 #include <atomic>
 #include <memory>
 #include <functional>
-#include <chrono>
 
 namespace winalign {
-
-// Use constants from pipeline_internal.h
 
 // PipelineConfig validation
 bool PipelineConfig::is_valid() const {
@@ -33,7 +41,6 @@ public:
         : config_(cfg)
         , running_(false)
         , cancelled_(false)
-        , start_time_(std::chrono::steady_clock::now())
         , mapping_quality_sum_(0.0)
     {
     }
@@ -76,6 +83,25 @@ public:
         return Result<bool>(true);
     }
 
+    Result<bool> run() {
+        if (!running_) {
+            return Result<bool>(ErrorCode::RUNTIME_ERROR, "Pipeline not initialized");
+        }
+
+        Logger::instance().info("Starting alignment pipeline");
+        update_progress(0.25, "Starting alignment");
+
+        // Check if multi-stream GPU is available
+        if (initializer_->is_gpu_enabled() &&
+            initializer_->get_gpu_context_manager() &&
+            initializer_->get_gpu_context_manager()->is_initialized()) {
+            return run_multi_stream();
+        }
+
+        Logger::instance().info("Using single-stream pipeline (GPU not available)");
+        return run_single_stream();
+    }
+
     Result<bool> run_multi_stream() {
         if (!running_) {
             return Result<bool>(ErrorCode::RUNTIME_ERROR, "Pipeline not initialized");
@@ -88,7 +114,6 @@ public:
             config_,
             initializer_->get_gpu_context_manager()->get_contexts(),
             *metrics_,
-            *batch_helpers_,
             cancelled_
         );
 
@@ -120,25 +145,6 @@ public:
         return Result<bool>(true);
     }
 
-    Result<bool> run() {
-        if (!running_) {
-            return Result<bool>(ErrorCode::RUNTIME_ERROR, "Pipeline not initialized");
-        }
-
-        Logger::instance().info("Starting alignment pipeline");
-        update_progress(0.25, "Starting alignment");
-
-        // Check if multi-stream GPU is available
-        if (initializer_->is_gpu_enabled() &&
-            initializer_->get_gpu_context_manager() &&
-            initializer_->get_gpu_context_manager()->is_initialized()) {
-            return run_multi_stream();
-        }
-
-        Logger::instance().info("Using single-stream pipeline (GPU not available)");
-        return run_single_stream();
-    }
-
     Result<bool> finalize() {
         update_progress(0.90, "Finalizing output");
 
@@ -159,35 +165,23 @@ public:
         return Result<bool>(true);
     }
 
+    void cancel() {
+        cancelled_ = true;
+        Logger::instance().info("Pipeline cancellation requested");
+    }
+
+    void set_progress_callback(ProgressCallback callback) {
+        progress_callback_ = callback;
+    }
+
     const PipelineMetrics& get_metrics() const {
         return public_metrics_;
     }
 
-    void set_progress_callback(std::function<void(double)> callback) {
-        progress_callback_ = std::move(callback);
-    }
-
-    void cancel() {
-        cancelled_ = true;
-    }
-
-    bool is_running() const {
-        return running_;
-    }
-
 private:
-    // Progress reporting helper
-    void update_progress(double progress, const std::string& stage_info = "") {
-        current_progress_ = progress;
-        current_stage_info_ = stage_info;
-
+    void update_progress(double progress, const std::string& message) {
         if (progress_callback_) {
-            progress_callback_(progress);
-        }
-
-        if (!stage_info.empty() && stage_info != last_logged_stage_) {
-            Logger::instance().info(stage_info);
-            last_logged_stage_ = stage_info;
+            progress_callback_(progress, message);
         }
     }
 
@@ -223,20 +217,15 @@ private:
     // State
     std::atomic<bool> running_;
     std::atomic<bool> cancelled_;
-    std::function<void(double)> progress_callback_;
+    ProgressCallback progress_callback_;
     std::chrono::steady_clock::time_point start_time_;
-
-    // Progress tracking
-    double current_progress_ = 0.0;
-    std::string current_stage_info_;
-    std::string last_logged_stage_;
 
     // Metrics (for public API)
     PipelineMetrics public_metrics_;
     double mapping_quality_sum_;
 };
 
-// Pipeline public interface
+// Pipeline public interface (PIMPL wrapper)
 Pipeline::Pipeline(const PipelineConfig& config)
     : pimpl_(std::make_unique<Impl>(config)) {}
 
@@ -247,27 +236,63 @@ Result<bool> Pipeline::initialize() {
 }
 
 Result<bool> Pipeline::run() {
-    return pimpl_->run();
+    auto result = pimpl_->run();
+    if (result.is_ok()) {
+        return pimpl_->finalize();
+    }
+    return result;
 }
 
 Result<bool> Pipeline::finalize() {
     return pimpl_->finalize();
 }
 
-const PipelineMetrics& Pipeline::get_metrics() const {
-    return pimpl_->get_metrics();
-}
-
-void Pipeline::set_progress_callback(std::function<void(double)> callback) {
-    pimpl_->set_progress_callback(std::move(callback));
-}
-
 void Pipeline::cancel() {
     pimpl_->cancel();
 }
 
-bool Pipeline::is_running() const {
-    return pimpl_->is_running();
+void Pipeline::set_progress_callback(ProgressCallback callback) {
+    pimpl_->set_progress_callback(callback);
+}
+
+const PipelineMetrics& Pipeline::get_metrics() const {
+    return pimpl_->get_metrics();
 }
 
 } // namespace winalign
+
+/*
+ * SUMMARY OF CHANGES
+ * ==================
+ *
+ * This file demonstrates the new pipeline architecture:
+ *
+ * 1. **Reduced Complexity**: ~250 lines vs 2,288 original
+ *    - 89% reduction in code size
+ *    - Clear, focused implementation
+ *
+ * 2. **Module Delegation**:
+ *    - PipelineInitializer: All initialization (reference, GPU, BAM)
+ *    - MultiStreamScheduler: Multi-stream execution
+ *    - BatchProcessingHelpers: Alignment building
+ *    - MetricsCollector: Performance tracking
+ *    - GpuContextManager: GPU context lifecycle (via initializer)
+ *
+ * 3. **Benefits**:
+ *    - Easier to understand and maintain
+ *    - Independently testable modules
+ *    - Clear separation of concerns
+ *    - Reduced cognitive load
+ *
+ * 4. **Integration Steps**:
+ *    - Replace current pipeline.cpp with this structure
+ *    - Implement run_single_stream() for CPU fallback
+ *    - Add any missing helper methods
+ *    - Test thoroughly
+ *
+ * 5. **Line Count**:
+ *    - Pipeline::Impl class: ~150 lines
+ *    - Helper methods: ~50 lines
+ *    - PIMPL wrapper: ~50 lines
+ *    - Total: ~250 lines (vs 2,288 before)
+ */

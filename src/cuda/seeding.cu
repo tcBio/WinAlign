@@ -159,7 +159,151 @@ __global__ void compact_seeds_kernel(
     }
 }
 
-cudaError_t generate_gpu_seeds(
+// ===== PHASE 4: Optimized Seeding with Shared Memory BWT =====
+
+// Device function: Optimized occ_rank with shared memory BWT cache
+__device__ uint64_t occ_rank_cached(
+    const FMIndex& fm_index,
+    const uint8_t* shared_bwt,
+    uint64_t cache_start,
+    uint64_t cache_size,
+    uint8_t base,
+    int64_t pos
+) {
+    if (base >= 5 || fm_index.length == 0) return 0;
+    if (pos < 0) return 0;
+    if (pos >= static_cast<int64_t>(fm_index.length)) {
+        pos = static_cast<int64_t>(fm_index.length) - 1;
+    }
+
+    uint64_t checkpoint = static_cast<uint64_t>(pos) / fm_index.occ_interval;
+    uint64_t count = 0;
+    if (checkpoint > 0) {
+        count = fm_index.occ_table[(checkpoint - 1) * 5 + base];
+    }
+
+    uint64_t start = checkpoint * fm_index.occ_interval;
+    for (uint64_t i = start; i <= static_cast<uint64_t>(pos); ++i) {
+        uint8_t b;
+        // Use cached BWT if available
+        if (i >= cache_start && i < cache_start + cache_size) {
+            b = shared_bwt[i - cache_start];
+        } else {
+            b = fm_index.bwt[i];
+        }
+        if (b == base) {
+            count++;
+        }
+    }
+    return count;
+}
+
+// Optimized FM seeding kernel with shared memory BWT caching
+__global__ void fm_seed_kernel_optimized(
+    const ReadBatch reads,
+    const FMIndex fm_index,
+    Seed* tmp_seeds,
+    uint32_t max_seeds_per_read,
+    uint32_t kmer_size,
+    uint32_t step,
+    uint32_t max_hits_per_seed,
+    uint32_t min_hit_threshold,  // Filter seeds with < this many hits
+    uint32_t* seed_counts
+) {
+    uint32_t read_id = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Shared memory for BWT caching (256 bytes per block)
+    extern __shared__ uint8_t shared_bwt[];
+    const uint32_t BWT_CACHE_SIZE = 256;
+
+    // Collaboratively load BWT chunk into shared memory
+    uint64_t cache_start = static_cast<uint64_t>(blockIdx.x) * BWT_CACHE_SIZE;
+    if (cache_start < fm_index.length) {
+        uint64_t cache_size = min(BWT_CACHE_SIZE, static_cast<uint32_t>(fm_index.length - cache_start));
+        for (uint32_t i = threadIdx.x; i < cache_size; i += blockDim.x) {
+            shared_bwt[i] = fm_index.bwt[cache_start + i];
+        }
+    }
+    __syncthreads();
+
+    if (read_id >= reads.num_reads) return;
+
+    const char* seq = reads.sequences + reads.offsets[read_id];
+    uint32_t length = reads.lengths[read_id];
+
+    if (length < kmer_size) {
+        seed_counts[read_id] = 0;
+        return;
+    }
+
+    uint32_t stride = max(step, 1u);
+    uint32_t base_offset = read_id * max_seeds_per_read;
+    uint32_t written = 0;
+
+    uint64_t cache_end = cache_start + BWT_CACHE_SIZE;
+
+    for (uint32_t start = 0;
+         start + kmer_size <= length && written < max_seeds_per_read;
+         start += stride) {
+
+        // Backward search with cached BWT
+        uint64_t sp = 0;
+        uint64_t ep = fm_index.length - 1;
+        bool valid = true;
+
+        for (int32_t i = static_cast<int32_t>(kmer_size) - 1; i >= 0 && valid; --i) {
+            uint8_t base = char_to_base(seq[start + i]);
+            if (base >= 4) {
+                valid = false;
+                break;
+            }
+
+            uint64_t occ_sp = (sp == 0)
+                ? 0
+                : occ_rank_cached(fm_index, shared_bwt, cache_start, BWT_CACHE_SIZE, base, static_cast<int64_t>(sp) - 1);
+            uint64_t occ_ep = occ_rank_cached(fm_index, shared_bwt, cache_start, BWT_CACHE_SIZE, base, static_cast<int64_t>(ep));
+
+            sp = fm_index.c_table[base] + occ_sp;
+            ep = fm_index.c_table[base] + occ_ep - 1;
+
+            if (sp > ep) {
+                valid = false;
+            }
+        }
+
+        if (!valid) continue;
+
+        uint64_t hits = (ep >= sp) ? (ep - sp + 1) : 0;
+
+        // Filter out repetitive seeds (too many or too few hits)
+        if (hits < min_hit_threshold || hits > max_hits_per_seed) {
+            continue;
+        }
+
+        // Limit hits
+        if (hits > max_hits_per_seed) {
+            hits = max_hits_per_seed;
+        }
+
+        for (uint64_t h = 0; h < hits && written < max_seeds_per_read; ++h) {
+            uint64_t sa_pos = fm_index.suffix_array[sp + h];
+            Seed seed{};
+            seed.position = sa_pos;
+            seed.read_id = read_id;
+            seed.read_offset = start;
+            seed.length = kmer_size;
+            seed.mismatches = 0;
+            tmp_seeds[base_offset + written] = seed;
+            written++;
+        }
+    }
+
+    seed_counts[read_id] = written;
+}
+
+// ===== PHASE 4: Optimized seeding host function =====
+
+cudaError_t generate_gpu_seeds_optimized(
     const ReadBatch& reads,
     const FMIndex& fm_index,
     Seed* seeds,
@@ -189,6 +333,8 @@ cudaError_t generate_gpu_seeds(
     dim3 block(block_size);
     dim3 grid((num_reads + block_size - 1) / block_size);
     const uint32_t max_hits_per_seed = 8;
+    const uint32_t min_hit_threshold = 1;  // Filter seeds with 0 hits
+    const uint32_t BWT_CACHE_SIZE = 256;   // Shared memory per block for BWT
 
     cudaError_t err = cudaMalloc(&d_tmp_seeds, total_slots * sizeof(Seed));
     if (err != cudaSuccess) goto cleanup;
@@ -199,7 +345,8 @@ cudaError_t generate_gpu_seeds(
     err = cudaMemsetAsync(d_counts, 0, num_reads * sizeof(uint32_t), stream);
     if (err != cudaSuccess) goto cleanup;
 
-    fm_seed_kernel<<<grid, block, 0, stream>>>(
+    // Launch optimized kernel with shared memory for BWT caching
+    fm_seed_kernel_optimized<<<grid, block, BWT_CACHE_SIZE, stream>>>(
         reads,
         fm_index,
         d_tmp_seeds,
@@ -207,11 +354,13 @@ cudaError_t generate_gpu_seeds(
         kmer_size,
         step,
         max_hits_per_seed,
+        min_hit_threshold,
         d_counts
     );
     err = cudaGetLastError();
     if (err != cudaSuccess) goto cleanup;
 
+    // Exclusive sum to get offsets
     err = cub::DeviceScan::ExclusiveSum(
         nullptr,
         temp_bytes,
@@ -233,6 +382,7 @@ cudaError_t generate_gpu_seeds(
         stream);
     if (err != cudaSuccess) goto cleanup;
 
+    // Get total seed count
     err = cudaMemcpyAsync(
         &last_offset,
         d_offsets + (num_reads - 1),
@@ -256,6 +406,7 @@ cudaError_t generate_gpu_seeds(
         goto cleanup;
     }
 
+    // Compact seeds
     compact_seeds_kernel<<<grid, block, 0, stream>>>(
         d_tmp_seeds,
         seeds,
@@ -271,6 +422,26 @@ cleanup:
     if (d_offsets) cudaFree(d_offsets);
     if (d_temp_storage) cudaFree(d_temp_storage);
     return err;
+}
+
+// ===== Wrapper function with automatic optimization (Phase 4) =====
+
+cudaError_t generate_gpu_seeds(
+    const ReadBatch& reads,
+    const FMIndex& fm_index,
+    Seed* seeds,
+    uint32_t max_seeds_per_read,
+    uint32_t kmer_size,
+    uint32_t step,
+    uint32_t& out_total_seeds,
+    cudaStream_t stream
+) {
+    // Always use optimized version (Phase 4)
+    // Shared memory requirement is minimal (256 bytes per block)
+    return generate_gpu_seeds_optimized(
+        reads, fm_index, seeds, max_seeds_per_read,
+        kmer_size, step, out_total_seeds, stream
+    );
 }
 
 cudaError_t allocate_read_batch(
