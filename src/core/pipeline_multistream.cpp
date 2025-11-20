@@ -447,7 +447,8 @@ cudaError_t MultiStreamScheduler::launch_seeding(GpuBatchContext& ctx) {
 }
 
 cudaError_t MultiStreamScheduler::launch_alignment(GpuBatchContext& ctx) {
-    if (ctx.num_seeds == 0) {
+    // FIX: With seed chaining, check read_count (not num_seeds)
+    if (ctx.read_count == 0) {
         return cudaSuccess;
     }
 

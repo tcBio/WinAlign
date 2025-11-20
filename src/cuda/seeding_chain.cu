@@ -42,6 +42,10 @@ __global__ void chain_seeds_kernel(
     // Handle edge cases
     if (count == 0) {
         chain_scores_out[read_id] = 0;
+        // Initialize null seed for reads with no seeds
+        Seed null_seed = {};  // Zero-initialize all fields
+        null_seed.read_id = read_id;
+        best_seeds_out[read_id] = null_seed;
         return;
     }
 
